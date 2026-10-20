@@ -1,13 +1,13 @@
 """Conservative byte-level PDF triage. No document code is executed."""
 from __future__ import annotations
 
-import hashlib
 import math
 import re
 from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from .file_input import read_file
 from .pdf_structure import analyze_pdf_structure
 
 # These are PDF names / lexical indicators, not signatures of maliciousness.
@@ -58,24 +58,13 @@ def _count_pdf_name(data: bytes, name: bytes) -> int:
 
 
 def analyze_pdf(path: str | Path, max_bytes: int = 100 * 1024 * 1024) -> dict[str, Any]:
-    if max_bytes < 1:
-        raise ValueError("max_bytes must be positive")
-    file_path = Path(path).expanduser()
-    if not file_path.exists() or not file_path.is_file():
-        raise FileNotFoundError(f"Input file not found or not a regular file: {file_path}")
-    try:
-        with file_path.open("rb") as handle:
-            data = handle.read(max_bytes + 1)
-    except OSError as exc:
-        raise OSError(f"Could not read input file: {exc}") from exc
-    if len(data) > max_bytes:
-        raise ValueError(
-            f"Input exceeds the configured limit ({max_bytes} bytes). Use --max-bytes to raise the limit deliberately."
-        )
+    file_input = read_file(path, max_bytes=max_bytes)
+    file_path = file_input.path
+    data = file_input.data
 
     header_offset = data[:1024].find(b"%PDF-")
     is_pdf = header_offset >= 0
-    sha256 = hashlib.sha256(data).hexdigest()
+    sha256 = file_input.sha256
     marker_counts = {key: _count_pdf_name(data, marker) for marker, (key, _) in PDF_MARKERS.items()}
     evidence: list[dict[str, Any]] = [
         {
