@@ -34,3 +34,4 @@ testpaths = ["tests"]
 
 [project.optional-dependencies]
 bulk = ["ijson>=3.3.0"]
+test = ["pytest>=8.0"]
