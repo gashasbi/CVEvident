@@ -422,9 +422,27 @@ def search_product_cves(query: str, db_path: str | Path | None = None, limit: in
     every row (including the large raw_json field) and filtering it in Python can exhaust
     memory or make interactive terminals appear unresponsive.
     """
+    import re
+
     terms = list(dict.fromkeys(tokenize(query)))
     if not terms:
         return []
+    term_patterns = []
+    for term in terms:
+        alternatives = [term]
+        if "_" in term:
+            alternatives.append(term.replace("_", " "))
+        patterns = []
+        for alternative in alternatives:
+            # Treat a query term as a token, not an arbitrary substring.
+            if "_" in alternative:
+                left_boundary = r"(?<![a-z0-9_])"
+                right_boundary = r"(?![a-z0-9_])"
+            else:
+                left_boundary = r"(?<![a-z0-9])"
+                right_boundary = r"(?![a-z0-9])"
+            patterns.append(re.compile(left_boundary + re.escape(alternative) + right_boundary))
+        term_patterns.append((term, patterns))
     safe_limit = max(1, min(int(limit), 200))
     candidates: dict[str, dict[str, Any]] = {}
 
@@ -468,8 +486,8 @@ def search_product_cves(query: str, db_path: str | Path | None = None, limit: in
                 for key in ("matched_vendor", "matched_product", "matched_criteria")
             ).lower()
             matching = [
-                term for term in terms
-                if term in product_text or term.replace("_", " ") in product_text
+                term for term, patterns in term_patterns
+                if any(pattern.search(product_text) for pattern in patterns)
             ]
             if not matching:
                 continue

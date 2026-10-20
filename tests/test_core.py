@@ -264,6 +264,16 @@ class DatabaseAndImportTests(TempProject):
         results = search_product_cves("reader_v2", self.db)
         self.assertEqual([row["cve_id"] for row in results], ["CVE-2099-12345"])
 
+    def test_product_search_requires_token_boundaries(self):
+        payload = {"vulnerabilities": [
+            self.nvd_payload(cve_id="CVE-2099-12345", product="application")["vulnerabilities"][0],
+            self.nvd_payload(cve_id="CVE-2099-12346", product="app")["vulnerabilities"][0],
+        ]}
+        path = self.write_json("token-boundary-products.json", payload)
+        import_nvd_json(path, self.db)
+        results = search_product_cves("app", self.db)
+        self.assertEqual([row["cve_id"] for row in results], ["CVE-2099-12346"])
+
     def test_kev_import_and_does_not_overwrite_nvd_description(self):
         import_nvd_json(self.write_json("nvd.json", self.nvd_payload()), self.db)
         kev = self.write_json("kev.json", {"vulnerabilities": [{
