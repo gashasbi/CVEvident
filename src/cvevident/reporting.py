@@ -31,9 +31,56 @@ def to_markdown(report: dict[str, Any]) -> str:
         "",
         "## Metrics",
         "",
-        f"- PDF header found: `{metrics.get('pdf_header_found')}`",
-        f"- Global byte entropy (bits/byte): `{metrics.get('global_byte_entropy_bits_per_byte')}`",
     ]
+    office = report.get("office_analysis", {})
+    if office:
+        lines += [
+            f"- ZIP entries declared: `{office.get('container_entry_count', 0)}`",
+            f"- Declared uncompressed bytes: `{office.get('declared_uncompressed_bytes', 0)}`",
+            f"- XML parts inspected: `{office.get('xml_parts_inspected', 0)}`",
+            f"- XML bytes inspected: `{office.get('xml_bytes_inspected', 0)}`",
+            "",
+            "## Office package analysis",
+            "",
+            f"- Package status: `{office.get('status', 'unknown')}`",
+            f"- Detected format: `{office.get('format_id', 'unknown')}`",
+            f"- Office family: `{office.get('family', 'unknown')}`",
+            f"- Main part: `{_report_single_line(office.get('main_part', 'unknown'))}`",
+            f"- Macro-enabled format: `{office.get('macro_enabled_format')}`",
+            f"- VBA project binary present: `{office.get('vba_project_present')}`",
+            f"- Analysis truncated: `{office.get('truncated', False)}`",
+            "",
+            "Office package indicators are static observations, not a malware verdict. No macro or external target was executed or opened.",
+        ]
+        features = office.get("features", {})
+        if features:
+            lines += ["", "| Office feature | Observed value |", "|---|---:|"]
+            for key in sorted(features):
+                value = features[key]
+                if value is True or (isinstance(value, int) and not isinstance(value, bool) and value > 0):
+                    lines.append(f"| `{_report_single_line(key)}` | `{_report_single_line(value)}` |")
+        relationships = office.get("external_relationships", [])
+        if relationships:
+            lines += ["", "### External relationships (targets not opened)", "", "| Source part | Relationship type | Target |", "|---|---|---|"]
+            for relation in relationships[:25]:
+                cells = [
+                    _report_single_line(relation.get("source_part", "")).replace("|", "\\|"),
+                    _report_single_line(relation.get("relationship_type", "")).replace("|", "\\|"),
+                    _report_single_line(relation.get("target", "")).replace("|", "\\|"),
+                ]
+                lines.append("| " + " | ".join(cells) + " |")
+        parts = office.get("parts_inventory", [])
+        if parts:
+            lines += ["", "### XML parts inspected", ""]
+            lines.extend(f"- `{_report_single_line(part)}`" for part in parts[:80])
+        if office.get("warnings"):
+            lines += ["", "### Office parser notes", ""]
+            lines.extend(f"- {_report_single_line(warning)}" for warning in office["warnings"])
+    else:
+        lines += [
+            f"- PDF header found: `{metrics.get('pdf_header_found')}`",
+            f"- Global byte entropy (bits/byte): `{metrics.get('global_byte_entropy_bits_per_byte')}`",
+        ]
     structural = report.get("structural_analysis", {})
     if structural:
         lines += [
@@ -60,13 +107,12 @@ def to_markdown(report: dict[str, Any]) -> str:
         for key in selected:
             if key in features:
                 lines.append(f"| `{key}` | `{features[key]}` |")
-    local = metrics.get("local_byte_entropy", {})
-    lines += [
-        f"- Local entropy mean / max / min: `{local.get('mean')}` / `{local.get('max')}` / `{local.get('min')}`",
-        "",
-        "## Evidence",
-        "",
-    ]
+    if not office:
+        local = metrics.get("local_byte_entropy", {})
+        lines += [
+            f"- Local entropy mean / max / min: `{local.get('mean')}` / `{local.get('max')}` / `{local.get('min')}`",
+        ]
+    lines += ["", "## Evidence", ""]
     for index, item in enumerate(report.get("evidence", []), start=1):
         details = item.get("details", {})
         lines.append(f"{index}. **{item.get('key', 'unknown')}** — `{item.get('value')}` ({item.get('severity', 'info')})")

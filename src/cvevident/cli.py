@@ -36,7 +36,7 @@ def _write_output(content: str, output: str | None) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="cvevident",
-        description="Local-first, evidence-led static PDF structural triage and CVE context.",
+        description="Local-first, evidence-led static PDF and Office Open XML triage with local CVE context.",
     )
     parser.add_argument("--version", action="version", version=f"CVEvident {__version__}")
     parser.add_argument("--db", default=str(default_db_path()), help="SQLite path (must appear before the subcommand)")
@@ -80,7 +80,17 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("show-cve", help="Display a CVE and its locally imported products/references")
     p.add_argument("cve_id")
 
-    p = sub.add_parser("analyze", help="Run conservative static lexical and structural triage on a PDF")
+    p = sub.add_parser(
+        "analyze",
+        help="Run bounded static triage on supported PDF or modern Office Open XML files",
+        epilog=(
+            "Office Open XML support: Word .docx/.docm/.dotx/.dotm; "
+            "Excel .xlsx/.xlsm/.xltx/.xltm/.xlsb/.xlam; "
+            "PowerPoint .pptx/.pptm/.ppsx/.ppsm/.potx/.potm/.ppam/.sldx/.sldm. "
+            "Legacy binary Office formats (.doc/.xls/.ppt) are not supported. "
+            "See docs/office-triage.md for observation limits and safety boundaries."
+        ),
+    )
     p.add_argument("file")
     p.add_argument("--target-product", help="Product context for local affected-product CPE retrieval")
     p.add_argument("--output", help="Report path; use '-' or omit to print")

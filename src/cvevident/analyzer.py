@@ -10,6 +10,7 @@ from . import __version__
 from .db import connect
 from .evidence_engine import build_cve_associations, build_product_context, evidence_summary
 from .pdf_triage import analyze_pdf
+from .office_triage import LEGACY_OFFICE_EXTENSIONS, OFFICE_EXTENSIONS, analyze_office
 from .store import lookup_reference_samples
 
 
@@ -20,13 +21,51 @@ def _now() -> str:
 def analyze_file(path: str | Path, db_path: str | Path | None = None,
                  target_product: str | None = None, max_bytes: int = 100 * 1024 * 1024,
                  candidate_limit: int = 10) -> dict[str, Any]:
-    report = analyze_pdf(path, max_bytes=max_bytes)
+    input_path = Path(path).expanduser()
+    suffix = input_path.suffix.lower()
+    try:
+        with input_path.open("rb") as handle:
+            prefix = handle.read(1024)
+    except OSError:
+        # Let the selected analyzer provide the established missing/unreadable-file error.
+        prefix = b""
+
+    # Prefer content signatures over suffixes when a file is clearly a PDF or ZIP
+    # package. The OOXML analyzer validates its own content-type manifest before
+    # treating a ZIP as an Office document.
+    if b"%PDF-" in prefix[:1024]:
+        report = analyze_pdf(input_path, max_bytes=max_bytes)
+    elif suffix in OFFICE_EXTENSIONS or suffix in LEGACY_OFFICE_EXTENSIONS or prefix.startswith(
+        (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
+    ):
+        report = analyze_office(str(input_path), max_bytes=max_bytes)
+    else:
+        # Preserve PDF triage's prior behavior for unknown/non-PDF inputs while the
+        # caller is migrating; future format analyzers can join this dispatch layer.
+        report = analyze_pdf(input_path, max_bytes=max_bytes)
+
     report["tool_version"] = __version__
     report["created_at"] = _now()
-    report["scope"] = {
-        "implemented": ["sha256", "PDF header check", "byte entropy", "local entropy", "PDF-name lexical counts", "bounded pypdf object-graph inspection", "PDF action/annotation/form/embedded-file structural indicators"],
-        "not_implemented": ["complete semantic PDF validation", "arbitrary stream-content extraction", "dynamic analysis", "exploit detection", "definitive CVE attribution"],
-    }
+    if report.get("office_analysis") is not None:
+        report["scope"] = {
+            "implemented": [
+                "SHA-256 and bounded input read", "OOXML content-type-based format identification",
+                "bounded ZIP member inventory", "bounded XML and package relationship inspection",
+                "VBA/ActiveX/embedded-object/external-link structural indicators",
+                "Office formula/field/link indicators when present in inspected XML parts",
+            ],
+            "not_implemented": [
+                "legacy binary OLE/CFB Office parsing", "VBA decompilation or execution",
+                "full semantic Word/Excel/PowerPoint parsing", "opening/fetching external targets",
+                "embedded-object extraction or execution", "dynamic analysis", "exploit detection",
+                "definitive CVE attribution",
+            ],
+        }
+    else:
+        report["scope"] = {
+            "implemented": ["sha256", "PDF header check", "byte entropy", "local entropy", "PDF-name lexical counts", "bounded pypdf object-graph inspection", "PDF action/annotation/form/embedded-file structural indicators"],
+            "not_implemented": ["complete semantic PDF validation", "arbitrary stream-content extraction", "dynamic analysis", "exploit detection", "definitive CVE attribution"],
+        }
     report["reference_sample_matches"] = lookup_reference_samples(report["file"]["sha256"], db_path)
     for sample in report["reference_sample_matches"]:
         report["evidence"].append({
