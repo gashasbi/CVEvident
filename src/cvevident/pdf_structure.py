@@ -12,6 +12,8 @@ from typing import Any
 
 _MAX_CONTAINERS = 20_000
 _MAX_DEPTH = 64
+_MAX_FINDINGS = 500
+_MAX_PATH_LENGTH = 1_024
 
 _ANNOTATION_SUBTYPES = {
     "/Text", "/Link", "/FreeText", "/Line", "/Square", "/Circle", "/Polygon",
@@ -51,6 +53,13 @@ def _base_result(status: str, parser_version: str | None = None) -> dict[str, An
         "truncated": False,
         "resolution_errors": 0,
         "resolution_error_types": [],
+        "findings": [],
+        "findings_truncated": False,
+        "location_semantics": (
+            "object_path is a best-effort path through parsed PDF dictionaries and arrays, "
+            "not a byte offset. object_reference identifies the containing indirect object "
+            "when available; direct objects may have no object reference."
+        ),
         "features": {
             "open_action_entries": 0,
             "additional_action_entries": 0,
@@ -82,6 +91,24 @@ def _base_result(status: str, parser_version: str | None = None) -> dict[str, An
         },
         "warnings": [],
     }
+
+
+def _reference_label(obj: Any) -> str | None:
+    """Return a stable human-readable label for a pypdf indirect reference."""
+    if getattr(obj, "idnum", None) is None or getattr(obj, "generation", None) is None:
+        return None
+    try:
+        return f"{int(obj.idnum)} {int(obj.generation)} R"
+    except (TypeError, ValueError):
+        return None
+
+
+def _join_object_path(parent: str, segment: str, inherited_truncation: bool) -> tuple[str, bool]:
+    """Append a dictionary key/array index while keeping report paths bounded."""
+    path = f"{parent}{segment}"
+    if len(path) <= _MAX_PATH_LENGTH:
+        return path, inherited_truncation
+    return path[: _MAX_PATH_LENGTH - 3] + "...", True
 
 
 def analyze_pdf_structure(data: bytes, is_pdf: bool) -> dict[str, Any]:
@@ -124,6 +151,7 @@ def analyze_pdf_structure(data: bytes, is_pdf: bool) -> dict[str, Any]:
         try:
             trailer = reader.trailer
             root_obj = trailer.get("/Root")
+            root_reference = _reference_label(root_obj) if isinstance(root_obj, IndirectObject) else None
             if isinstance(root_obj, IndirectObject):
                 root_obj = root_obj.get_object()
             if not isinstance(root_obj, DictionaryObject):
@@ -156,7 +184,34 @@ def analyze_pdf_structure(data: bytes, is_pdf: bool) -> dict[str, Any]:
             result["resolution_errors"] += 1
             result["resolution_error_types"].append(type(exc).__name__)
 
-        stack: list[tuple[Any, int]] = [(root_obj, 0)]
+        findings: list[dict[str, Any]] = result["findings"]
+        findings_truncated = False
+
+        def record_finding(
+            feature: str,
+            value: Any,
+            object_path: str,
+            object_reference: str | None,
+            details: dict[str, Any] | None = None,
+            path_truncated: bool = False,
+        ) -> None:
+            nonlocal findings_truncated
+            if len(findings) >= _MAX_FINDINGS:
+                findings_truncated = True
+                return
+            finding = {
+                "feature": feature,
+                "value": value,
+                "object_path": object_path,
+                "object_reference": object_reference,
+                "path_truncated": path_truncated,
+                "details": details or {},
+            }
+            findings.append(finding)
+
+        stack: list[tuple[Any, int, str, str | None, bool]] = [
+            (root_obj, 0, "/Root", root_reference, False)
+        ]
         seen_refs: set[tuple[int, int]] = set()
         seen_containers: set[int] = set()
         action_counts: Counter[str] = Counter()
@@ -167,7 +222,7 @@ def analyze_pdf_structure(data: bytes, is_pdf: bool) -> dict[str, Any]:
             if result["containers_inspected"] >= _MAX_CONTAINERS:
                 truncated = True
                 break
-            obj, depth = stack.pop()
+            obj, depth, object_path, object_reference, path_truncated = stack.pop()
             if depth > _MAX_DEPTH:
                 truncated = True
                 continue
@@ -177,6 +232,7 @@ def analyze_pdf_structure(data: bytes, is_pdf: bool) -> dict[str, Any]:
                 if ref_key in seen_refs:
                     continue
                 seen_refs.add(ref_key)
+                object_reference = _reference_label(obj) or object_reference
                 try:
                     obj = obj.get_object()
                     result["indirect_references_resolved"] += 1
@@ -195,20 +251,51 @@ def analyze_pdf_structure(data: bytes, is_pdf: bool) -> dict[str, Any]:
 
             if isinstance(obj, DictionaryObject):
                 features["stream_objects_seen"] += int(isinstance(obj, StreamObject))
+                if object_path == "/Root" and "/AcroForm" in obj:
+                    acroform_path, acroform_path_truncated = _join_object_path(object_path, "/AcroForm", path_truncated)
+                    record_finding("acroform_entry", True, acroform_path, object_reference,
+                                   {"containing_dictionary_path": object_path}, acroform_path_truncated)
                 features["open_action_entries"] += int("/OpenAction" in obj)
+                if "/OpenAction" in obj:
+                    finding_path, finding_path_truncated = _join_object_path(object_path, "/OpenAction", path_truncated)
+                    record_finding("open_action_entry", True, finding_path, object_reference,
+                                   {"containing_dictionary_path": object_path}, finding_path_truncated)
                 features["additional_action_entries"] += int("/AA" in obj)
+                if "/AA" in obj:
+                    finding_path, finding_path_truncated = _join_object_path(object_path, "/AA", path_truncated)
+                    record_finding("additional_action_entry", True, finding_path, object_reference,
+                                   {"containing_dictionary_path": object_path}, finding_path_truncated)
                 features["embedded_files_name_tree_count"] += int("/EmbeddedFiles" in obj)
+                if "/EmbeddedFiles" in obj:
+                    finding_path, finding_path_truncated = _join_object_path(object_path, "/EmbeddedFiles", path_truncated)
+                    record_finding("embedded_files_name_tree", True, finding_path, object_reference,
+                                   {"containing_dictionary_path": object_path}, finding_path_truncated)
                 features["file_specifications_with_embedded_data"] += int("/EF" in obj)
-                features["rich_media_indicators"] += int("/RichMedia" in obj or "/RichMediaContent" in obj)
+                if "/EF" in obj:
+                    finding_path, finding_path_truncated = _join_object_path(object_path, "/EF", path_truncated)
+                    record_finding("embedded_file_data_entry", True, finding_path, object_reference,
+                                   {"containing_dictionary_path": object_path}, finding_path_truncated)
+                has_rich_media = "/RichMedia" in obj or "/RichMediaContent" in obj
+                features["rich_media_indicators"] += int(has_rich_media)
+                if has_rich_media:
+                    rich_key = "/RichMedia" if "/RichMedia" in obj else "/RichMediaContent"
+                    finding_path, finding_path_truncated = _join_object_path(object_path, rich_key, path_truncated)
+                    record_finding("rich_media_indicator", rich_key, finding_path, object_reference,
+                                   {"containing_dictionary_path": object_path}, finding_path_truncated)
                 # JavaScript actions can be referenced in the catalog's /Names dictionary;
                 # check that relationship explicitly rather than treating any key named
                 # /JavaScript elsewhere as a name-tree finding.
                 names_obj = obj.get("/Names")
                 try:
+                    names_reference = _reference_label(names_obj) if isinstance(names_obj, IndirectObject) else None
                     if isinstance(names_obj, IndirectObject):
                         names_obj = names_obj.get_object()
                     if isinstance(names_obj, DictionaryObject) and "/JavaScript" in names_obj:
                         features["javascript_name_tree_present"] = True
+                        names_path, names_path_truncated = _join_object_path(object_path, "/Names/JavaScript", path_truncated)
+                        record_finding("javascript_name_tree", True, names_path, names_reference,
+                                       {"catalog_path": object_path, "names_dictionary_reference": names_reference},
+                                       names_path_truncated)
                 except Exception as exc:
                     result["resolution_errors"] += 1
                     error_types.add(type(exc).__name__)
@@ -216,14 +303,23 @@ def analyze_pdf_structure(data: bytes, is_pdf: bool) -> dict[str, Any]:
                 subtype = str(obj.get("/Subtype", ""))
                 if subtype in _ANNOTATION_SUBTYPES:
                     features["annotations_total"] += 1
+                    subtype_path, subtype_path_truncated = _join_object_path(object_path, "/Subtype", path_truncated)
+                    record_finding("annotation_subtype", subtype, subtype_path, object_reference,
+                                   {"annotation_subtype": subtype}, subtype_path_truncated)
                     if subtype == "/Link":
                         features["link_annotations"] += 1
 
                 action_type = str(obj.get("/S", ""))
                 if action_type in _ACTION_TYPES:
                     action_counts[action_type] += 1
+                    action_path, action_path_truncated = _join_object_path(object_path, "/S", path_truncated)
+                    record_finding("action_type", action_type, action_path, object_reference,
+                                   {"feature_counter": _ACTION_TYPES[action_type]}, action_path_truncated)
                 elif action_type.startswith("/") and "/S" in obj:
                     features["unknown_action_count"] += 1
+                    action_path, action_path_truncated = _join_object_path(object_path, "/S", path_truncated)
+                    record_finding("unknown_action_type", action_type, action_path, object_reference,
+                                   {}, action_path_truncated)
 
                 # Only traverse object/container references. Strings and stream bytes are
                 # deliberately never decoded or interpreted as code.
@@ -231,33 +327,41 @@ def analyze_pdf_structure(data: bytes, is_pdf: bool) -> dict[str, Any]:
                 if remaining_capacity <= 0:
                     truncated = True
                 else:
-                    children = reversed(obj.values())
-                    for child in children:
+                    children = reversed(list(obj.items()))
+                    for key, child in children:
                         if not isinstance(child, (DictionaryObject, ArrayObject, IndirectObject)):
                             continue
                         if len(stack) >= remaining_capacity:
                             truncated = True
                             break
-                        stack.append((child, depth + 1))
+                        child_path, child_path_truncated = _join_object_path(object_path, str(key), path_truncated)
+                        stack.append((child, depth + 1, child_path, None, child_path_truncated))
             else:
                 remaining_capacity = _MAX_CONTAINERS - result["containers_inspected"] - len(stack)
                 if remaining_capacity <= 0:
                     truncated = True
                 else:
-                    for child in reversed(obj):
+                    for index in range(len(obj) - 1, -1, -1):
+                        child = obj[index]
                         if not isinstance(child, (DictionaryObject, ArrayObject, IndirectObject)):
                             continue
                         if len(stack) >= remaining_capacity:
                             truncated = True
                             break
-                        stack.append((child, depth + 1))
+                        child_path, child_path_truncated = _join_object_path(object_path, f"[{index}]", path_truncated)
+                        stack.append((child, depth + 1, child_path, None, child_path_truncated))
 
         for action, key in _ACTION_TYPES.items():
             features[key] = action_counts[action]
         features["unknown_action_count"] += 0
         result["truncated"] = truncated
-        result["status"] = "partial" if (truncated or result["resolution_errors"] > 0) else "parsed"
+        result["findings_truncated"] = findings_truncated
+        result["status"] = "partial" if (truncated or findings_truncated or result["resolution_errors"] > 0) else "parsed"
         result["resolution_error_types"] = sorted(set(result["resolution_error_types"]) | error_types)
+        if findings_truncated:
+            result["warnings"].append(
+                f"Structural finding details reached their reporting limit ({_MAX_FINDINGS}); additional findings were omitted."
+            )
         if truncated:
             result["warnings"].append(
                 f"Object-graph traversal reached its safety budget (max {_MAX_CONTAINERS} containers, depth {_MAX_DEPTH}); results may be incomplete."
@@ -270,6 +374,10 @@ def analyze_pdf_structure(data: bytes, is_pdf: bool) -> dict[str, Any]:
     except Exception as exc:
         result["status"] = "failed"
         result["error_type"] = type(exc).__name__
+        # Do not surface partially traversed structural findings as validated findings
+        # when the parser failed. Lexical observations remain available in pdf_triage.
+        result["findings"] = []
+        result["findings_truncated"] = False
         result["warnings"].append(
             f"The structural PDF parser could not complete ({type(exc).__name__}); lexical observations are retained, not treated as a structural finding."
         )

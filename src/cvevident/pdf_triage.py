@@ -156,6 +156,26 @@ def analyze_pdf(path: str | Path, max_bytes: int = 100 * 1024 * 1024) -> dict[st
                 "details": {"interpretation": meaning, "context_only": True},
             })
 
+    # Record bounded, location-aware observations alongside aggregate counters.
+    # Paths are logical traversal paths, not byte offsets, and do not prove exploitability.
+    for finding in structural_analysis.get("findings", []):
+        structural_evidence.append({
+            "evidence_type": "pdf_structural_finding",
+            "key": f"pdf.structure.finding.{finding.get('feature', 'unknown')}",
+            "value": finding.get("value"),
+            "severity": "info",
+            "details": {
+                "object_path": finding.get("object_path"),
+                "object_reference": finding.get("object_reference"),
+                "path_truncated": bool(finding.get("path_truncated", False)),
+                "location_semantics": structural_analysis.get("location_semantics"),
+                "observation_details": finding.get("details", {}),
+                "interpretation": (
+                    "This is a static structural observation, not a malware verdict or proof of CVE exploitation."
+                ),
+            },
+        })
+
     warnings = [
         "Static triage observations are not a malware verdict or proof of CVE exploitation.",
         "Lexical marker counts may miss escaped or compressed names; structural parsing may also be incomplete.",

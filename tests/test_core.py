@@ -149,6 +149,24 @@ class EntropyAndPDFTests(TempProject):
         self.assertEqual(report["assessment"]["verdict"], "not_assessed")
         self.assertTrue(any(e["key"] == "pdf.structure.javascript_action_count" for e in report["evidence"]))
 
+        # Structural findings should retain a logical object path, so later analysis
+        # can explain where an observation originated rather than report only totals.
+        findings = [
+            item for item in report["structural_analysis"]["findings"]
+            if item["feature"] == "action_type" and item["value"] == "/JavaScript"
+        ]
+        self.assertTrue(findings)
+        self.assertTrue(findings[0]["object_path"].startswith("/Root"))
+        self.assertIn("/S", findings[0]["object_path"])
+        self.assertIn("location_semantics", report["structural_analysis"])
+        finding_evidence = [
+            item for item in report["evidence"]
+            if item["evidence_type"] == "pdf_structural_finding"
+            and item["value"] == "/JavaScript"
+        ]
+        self.assertTrue(finding_evidence)
+        self.assertTrue(finding_evidence[0]["details"]["object_path"].startswith("/Root"))
+
     def test_lexical_javascript_string_is_not_structural_action(self):
         file_path = self.root / "metadata.pdf"
         writer = PdfWriter()
@@ -164,6 +182,10 @@ class EntropyAndPDFTests(TempProject):
         self.assertEqual(report["structural_analysis"]["status"], "parsed")
         self.assertEqual(report["metrics"]["marker_counts"]["pdf.javascript_name"], 1)
         self.assertEqual(report["structural_analysis"]["features"]["javascript_action_count"], 0)
+        self.assertFalse(any(
+            item["feature"] == "action_type" and item["value"] == "/JavaScript"
+            for item in report["structural_analysis"].get("findings", [])
+        ))
 
     def test_incomplete_marker_fixture_keeps_lexical_results_on_parser_failure(self):
         file_path = self.root / "incomplete.pdf"
@@ -172,6 +194,7 @@ class EntropyAndPDFTests(TempProject):
             report = analyze_pdf(file_path)
         self.assertEqual(report["metrics"]["marker_counts"]["pdf.open_action_name"], 1)
         self.assertEqual(report["structural_analysis"]["status"], "failed")
+        self.assertEqual(report["structural_analysis"]["findings"], [])
         self.assertEqual(report["assessment"]["verdict"], "not_assessed")
 
 
