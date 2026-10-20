@@ -613,7 +613,9 @@ def lookup_reference_samples(sha256: str, db_path: str | Path | None = None) -> 
         for row in rows:
             item = dict(row)
             item["cve_links"] = [dict(link) for link in conn.execute(
-                "SELECT l.cve_id,l.association_type,l.evidence_basis,l.confidence,l.verified,l.source_url, v.description "
+                "SELECT l.cve_id,l.association_type,l.evidence_basis,l.confidence,l.verified,l.source_url, "
+                "v.description,v.published,v.modified,v.cvss_score,v.cvss_severity,v.cisa_kev,v.kev_date_added, "
+                "v.epss_score,v.epss_percentile "
                 "FROM sample_vulnerability_links l JOIN vulnerabilities v USING(cve_id) "
                 "WHERE l.sample_id=? ORDER BY l.cve_id", (item["sample_id"],)
             ).fetchall()]

@@ -6,6 +6,11 @@ import json
 from typing import Any
 
 
+def _report_single_line(value: Any) -> str:
+    """Keep source-provided values on one report line and prevent inline-code delimiter breaks."""
+    return " ".join(str(value if value is not None else "").split()).replace("`", "ʼ")
+
+
 def to_markdown(report: dict[str, Any]) -> str:
     file_info = report.get("file", {})
     assessment = report.get("assessment", {})
@@ -95,6 +100,69 @@ def to_markdown(report: dict[str, Any]) -> str:
                 f"| {item.get('cve_id')} | {item.get('product_relevance_score')} | {item.get('cvss_score') or '—'} "
                 f"({item.get('cvss_severity') or 'unknown'}) | {'yes' if item.get('cisa_kev') else 'no'} | {item.get('epss_score') if item.get('epss_score') is not None else '—'} |"
             )
+    lines += ["", "## CVE association candidates", ""]
+    association_policy = report.get("cve_association_policy")
+    if association_policy:
+        lines.append(str(association_policy).replace("\r", " ").replace("\n", " "))
+    associations = report.get("cve_associations", [])
+    if not associations:
+        lines += ["", "No CVE association candidates were generated from the available sample links and product context."]
+    else:
+        for candidate in associations:
+            cve_id = _report_single_line(candidate.get("cve_id", "unknown"))
+            assessment_text = _report_single_line(candidate.get("assessment", "candidate_not_file_attribution"))
+            lines.append(f"- **{cve_id}** — `{assessment_text}`")
+            description = _report_single_line(candidate.get("description", ""))
+            if description:
+                lines.append(f"  - Description: {description[:400]}{'…' if len(description) > 400 else ''}")
+            if candidate.get("cvss_score") is not None:
+                lines.append(
+                    f"  - CVSS: {_report_single_line(candidate.get('cvss_score'))} "
+                    f"({_report_single_line(candidate.get('cvss_severity') or 'unknown')})"
+                )
+            kev_value = candidate.get("cisa_kev")
+            kev_status = "yes" if kev_value is True else "no" if kev_value is False else "unknown"
+            lines.append(
+                f"  - CISA KEV: {kev_status}; "
+                f"EPSS: {_report_single_line(candidate.get('epss_score') if candidate.get('epss_score') is not None else 'not available')}"
+            )
+            for basis in candidate.get("association_bases", []):
+                basis_type = basis.get("type")
+                if basis_type == "exact_sha256_sample_match":
+                    lines.append(
+                        "  - Basis: exact SHA-256 match to registered sample "
+                        f"`{_report_single_line(basis.get('sample_id', 'unknown'))}`."
+                    )
+                    lines.append(
+                        "    - Sample label/confidence: "
+                        f"{_report_single_line(basis.get('sample_label', 'unknown'))} / "
+                        f"{_report_single_line(basis.get('sample_confidence', 'unknown'))}; "
+                        f"CVE-link confidence: {_report_single_line(basis.get('link_confidence', 'unknown'))}; "
+                        f"link verified: {'yes' if basis.get('link_verified') else 'no'}."
+                    )
+                    if basis.get("link_association_type"):
+                        lines.append(f"    - Link type: {_report_single_line(basis['link_association_type'])}.")
+                    if basis.get("link_evidence_basis"):
+                        lines.append(f"    - Link evidence basis: {_report_single_line(basis['link_evidence_basis'])}")
+                    if basis.get("sample_source_name"):
+                        lines.append(f"    - Sample source: {_report_single_line(basis['sample_source_name'])}")
+                    if basis.get("link_source_url") or basis.get("sample_source_url"):
+                        source_url = basis.get("link_source_url") or basis.get("sample_source_url")
+                        lines.append(f"    - Source URL: {_report_single_line(source_url)}")
+                elif basis_type == "product_context":
+                    lines.append(
+                        "  - Basis: product context; target product "
+                        f"`{_report_single_line(basis.get('target_product') or 'unspecified')}`; matched "
+                        f"{_report_single_line(basis.get('matched_vendor') or 'unknown')}:"
+                        f"{_report_single_line(basis.get('matched_product') or 'unknown')}; "
+                        f"lexical retrieval score {_report_single_line(basis.get('product_relevance_score'))} "
+                        "(not a probability)."
+                    )
+                    if basis.get("matched_criteria"):
+                        lines.append(f"    - Matched CPE: `{_report_single_line(basis['matched_criteria'])}`")
+                if basis.get("interpretation"):
+                    lines.append(f"    - Interpretation: {_report_single_line(basis['interpretation'])}")
+    lines += ["", "Association ordering is for review only; it is not a calibrated probability or proof of exploitability."]
     lines += ["", "## Warnings", ""]
     lines.extend(f"- {warning}" for warning in report.get("warnings", []))
     lines += ["", "---", "Generated by CVEvident. Candidate ranking scores are retrieval scores, not probabilities.", ""]

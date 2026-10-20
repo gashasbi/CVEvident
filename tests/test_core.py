@@ -316,6 +316,47 @@ class DatabaseAndImportTests(TempProject):
         self.assertEqual(candidates[0]["assessment"], "product_context_candidate_not_file_attribution")
         self.assertLessEqual(candidates[0]["product_relevance_score"], 100)
 
+    def test_product_context_association_is_not_file_attribution(self):
+        import_nvd_json(self.write_json("nvd.json", self.nvd_payload()), self.db)
+        pdf = self.root / "context-only.pdf"
+        pdf.write_bytes(b"%PDF-1.7\n%%EOF")
+        report = analyze_file(pdf, self.db, target_product="example pdf_reader")
+        self.assertEqual(len(report["cve_associations"]), 1)
+        association = report["cve_associations"][0]
+        self.assertEqual(association["cve_id"], "CVE-2099-12345")
+        self.assertEqual(association["association_basis_types"], ["product_context"])
+        self.assertEqual(association["assessment"], "product_context_candidate_not_file_attribution")
+        self.assertEqual(association["association_bases"][0]["type"], "product_context")
+        self.assertIn("does not attribute the file", association["association_bases"][0]["interpretation"])
+
+    def test_exact_sample_cve_association_is_saved_without_product_context(self):
+        import_nvd_json(self.write_json("nvd.json", self.nvd_payload()), self.db)
+        pdf = self.root / "exact-sample-only.pdf"
+        pdf.write_bytes(b"%PDF-1.7\n%%EOF")
+        digest = __import__("hashlib").sha256(pdf.read_bytes()).hexdigest()
+        sample_path = self.write_json("samples.json", {"samples": [{
+            "sample_id": "SAMPLE-ONLY", "sha256": digest, "file_type": "pdf",
+            "label": "suspicious", "source_name": "unit test", "label_basis": "synthetic test relation",
+            "confidence": "medium", "cve_links": [{
+                "cve_id": "CVE-2099-12345", "evidence_basis": "unit test only",
+                "confidence": "medium", "verified": False,
+            }]
+        }]})
+        import_reference_samples_json(sample_path, self.db)
+        report = analyze_file(pdf, self.db)
+        self.assertEqual(len(report["cve_associations"]), 1)
+        association = report["cve_associations"][0]
+        self.assertEqual(association["association_basis_types"], ["exact_sha256_sample_match"])
+        self.assertEqual(association["assessment"], "exact_sample_link_not_proof_of_exploitability")
+        self.assertEqual(association["cvss_score"], 8.1)
+        loaded = get_analysis(report["analysis_id"], self.db)
+        self.assertEqual(loaded["cve_associations"], report["cve_associations"])
+        self.assertEqual(len(loaded["stored_candidates"]), 1)
+        self.assertEqual(loaded["stored_candidates"][0]["score"], 100.0)
+        rationale = json.loads(loaded["stored_candidates"][0]["rationale_json"])
+        self.assertEqual(rationale["score_semantics"], "exact_sha256_sample_retrieval_score_not_cve_link_confidence")
+        self.assertFalse(rationale["score_is_probability"])
+
     def test_reference_sample_import_with_cve_link(self):
         import_nvd_json(self.write_json("nvd.json", self.nvd_payload()), self.db)
         sample = self.write_json("samples.json", {"samples": [{
@@ -366,10 +407,25 @@ class DatabaseAndImportTests(TempProject):
         self.assertEqual(report["assessment"]["verdict"], "not_assessed")
         self.assertEqual(report["target_context"]["candidate_cves"][0]["cve_id"], "CVE-2099-12345")
         self.assertEqual(report["reference_sample_matches"][0]["sample_id"], "ANALYSIS-EXACT")
+        association = report["cve_associations"][0]
+        self.assertEqual(association["cve_id"], "CVE-2099-12345")
+        self.assertEqual(
+            association["association_basis_types"],
+            ["exact_sha256_sample_match", "product_context"],
+        )
+        sample_basis = next(
+            item for item in association["association_bases"]
+            if item["type"] == "exact_sha256_sample_match"
+        )
+        self.assertFalse(sample_basis["link_verified"])
+        self.assertEqual(sample_basis["link_confidence"], "low")
+        self.assertIn("not_proof_of_exploitability", association["assessment"])
         loaded = get_analysis(report["analysis_id"], self.db)
         self.assertEqual(loaded["file"]["sha256"], report["file"]["sha256"])
+        self.assertEqual(loaded["cve_associations"], report["cve_associations"])
         self.assertIsInstance(loaded["evidence"][0]["value"], (str, int))
         self.assertEqual(len(loaded["evidence"]), len(report["evidence"]))
+        self.assertEqual(loaded["stored_candidates"][0]["assessment"], association["assessment"])
 
     def test_stats_has_schema_sources_and_count(self):
         self.assertEqual(get_stats(self.db)["schema_version"], str(SCHEMA_VERSION))
@@ -451,6 +507,40 @@ class ReportAndCLITests(TempProject):
         self.assertNotIn("<script>alert(1)</script>", rendered)
         self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", rendered)
         self.assertIn("Object reference", rendered)
+
+    def test_markdown_and_html_report_show_cve_association_bases_safely(self):
+        report = {
+            "file": {"filename": "sample.pdf", "file_type": "pdf", "size_bytes": 100, "sha256": "c" * 64},
+            "assessment": {"verdict": "not_assessed"},
+            "metrics": {"pdf_header_found": True, "global_byte_entropy_bits_per_byte": 2.0},
+            "structural_analysis": {},
+            "evidence": [],
+            "target_context": {"target_product": "log4j", "candidate_cves": []},
+            "cve_association_policy": "Associations are candidates only.",
+            "cve_associations": [{
+                "cve_id": "CVE-2099-12345", "description": "Synthetic test record",
+                "cvss_score": 8.1, "cvss_severity": "HIGH", "cisa_kev": False, "epss_score": None,
+                "assessment": "exact_sample_link_not_proof_of_exploitability",
+                "association_bases": [{
+                    "type": "exact_sha256_sample_match", "sample_id": "SAMPLE-001",
+                    "sample_label": "suspicious", "sample_confidence": "low",
+                    "link_confidence": "low", "link_verified": False,
+                    "link_evidence_basis": "test-only metadata", "interpretation": "Not proof of exploitability.",
+                    "sample_source_name": "unit test",
+                }],
+                "association_basis_types": ["exact_sha256_sample_match"],
+            }],
+            "warnings": [],
+        }
+        markdown = to_markdown(report)
+        html_report = to_html(report)
+        self.assertIn("## CVE association candidates", markdown)
+        self.assertIn("exact SHA-256 match to registered sample", markdown)
+        self.assertIn("link verified: no", markdown)
+        self.assertIn("CVE-2099-12345", html_report)
+        self.assertIn("test-only metadata", html_report)
+        self.assertIn("Not proof of exploitability.", html_report)
+        self.assertNotIn("<script>", html_report)
 
     def test_markdown_report_mentions_not_assessed(self):
         pdf = self.root / "sample.pdf"

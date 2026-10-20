@@ -8,7 +8,7 @@ from typing import Any
 
 from . import __version__
 from .db import connect
-from .evidence_engine import build_product_context, evidence_summary
+from .evidence_engine import build_cve_associations, build_product_context, evidence_summary
 from .pdf_triage import analyze_pdf
 from .store import lookup_reference_samples
 
@@ -45,6 +45,14 @@ def analyze_file(path: str | Path, db_path: str | Path | None = None,
             },
         })
     report["target_context"] = build_product_context(target_product, str(db_path) if db_path else None, candidate_limit)
+    report["cve_associations"] = build_cve_associations(
+        report["reference_sample_matches"], report["target_context"]
+    )
+    report["cve_association_policy"] = (
+        "Candidate relations are separated by basis. Exact SHA-256 matches identify registered sample bytes; "
+        "linked CVEs retain the sample metadata's provenance and verification status. Product-context matches "
+        "are lexical retrieval results only. None of these relations alone proves exploitability."
+    )
     report["evidence_summary"] = evidence_summary(report["evidence"])
     # Store full report context as well as normalized evidence rows. This supports later report replay.
     with connect(db_path) as conn:
@@ -63,17 +71,30 @@ def analyze_file(path: str | Path, db_path: str | Path | None = None,
                 (analysis_id, item["evidence_type"], item["key"], json.dumps(item["value"], ensure_ascii=False),
                  item.get("severity", "info"), json.dumps(item.get("details", {}), ensure_ascii=False)),
             )
-        for rank, candidate in enumerate(report["target_context"]["candidate_cves"], start=1):
+        for rank, candidate in enumerate(report["cve_associations"], start=1):
+            bases = candidate["association_bases"]
+            has_exact_sample_match = any(
+                basis["type"] == "exact_sha256_sample_match" for basis in bases
+            )
+            product_scores = [
+                float(basis.get("product_relevance_score") or 0.0)
+                for basis in bases if basis["type"] == "product_context"
+            ]
+            score = 100.0 if has_exact_sample_match else max(product_scores, default=0.0)
+            score_semantics = (
+                "exact_sha256_sample_retrieval_score_not_cve_link_confidence"
+                if has_exact_sample_match
+                else "lexical_product_retrieval_score_not_probability"
+            )
             conn.execute(
                 """INSERT OR IGNORE INTO candidate_associations(analysis_id,cve_id,rank,score,assessment,rationale_json)
                    VALUES(?,?,?,?,?,?)""",
-                (analysis_id, candidate["cve_id"], rank, float(candidate["product_relevance_score"]),
-                 "product_context_candidate_not_file_attribution",
+                (analysis_id, candidate["cve_id"], rank, score, candidate["assessment"],
                  json.dumps({
-                     "matched_vendor": candidate["matched_vendor"],
-                     "matched_product": candidate["matched_product"],
-                     "matching_query_terms": candidate["matching_query_terms"],
-                     "score_semantics": "lexical_product_retrieval_score_not_probability",
+                     "association_basis_types": candidate["association_basis_types"],
+                     "association_bases": bases,
+                     "score_semantics": score_semantics,
+                     "score_is_probability": False,
                  }, ensure_ascii=False)),
             )
     report["analysis_id"] = analysis_id
