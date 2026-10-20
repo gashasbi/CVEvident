@@ -408,6 +408,50 @@ class ReportAndCLITests(TempProject):
         self.assertNotIn("<script>alert(1)</script>", rendered)
         self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;.pdf", rendered)
 
+    def test_markdown_report_includes_structural_finding_location(self):
+        report = {
+            "file": {"filename": "sample.pdf", "file_type": "pdf", "size_bytes": 100, "sha256": "a" * 64},
+            "assessment": {"verdict": "not_assessed"},
+            "metrics": {"pdf_header_found": True, "global_byte_entropy_bits_per_byte": 2.0},
+            "structural_analysis": {"status": "parsed", "parser": "pypdf", "parser_version": "6.21.1",
+                                    "page_count_declared": 1, "encrypted": False, "containers_inspected": 5,
+                                    "truncated": False, "features": {}},
+            "evidence": [{
+                "evidence_type": "pdf_structural_finding",
+                "key": "pdf.structure.finding.action_type",
+                "value": "/JavaScript",
+                "severity": "info",
+                "details": {"object_path": "/Root/Names/JavaScript/[0]/A/S",
+                            "object_reference": "12 0 R", "path_truncated": False,
+                            "interpretation": "Static structural observation only."},
+            }],
+            "warnings": [],
+        }
+        rendered = to_markdown(report)
+        self.assertIn("Object path: `/Root/Names/JavaScript/[0]/A/S`", rendered)
+        self.assertIn("Object reference: `12 0 R`", rendered)
+
+    def test_html_report_escapes_structural_finding_location(self):
+        report = {
+            "file": {"filename": "sample.pdf", "file_type": "pdf", "size_bytes": 100, "sha256": "b" * 64},
+            "assessment": {"verdict": "not_assessed"},
+            "metrics": {"pdf_header_found": True, "global_byte_entropy_bits_per_byte": 2.0},
+            "structural_analysis": {},
+            "evidence": [{
+                "evidence_type": "pdf_structural_finding",
+                "key": "pdf.structure.finding.action_type",
+                "value": "/JavaScript",
+                "severity": "info",
+                "details": {"object_path": "/Root/<script>alert(1)</script>",
+                            "object_reference": "12 0 R", "path_truncated": False},
+            }],
+            "warnings": [],
+        }
+        rendered = to_html(report)
+        self.assertNotIn("<script>alert(1)</script>", rendered)
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", rendered)
+        self.assertIn("Object reference", rendered)
+
     def test_markdown_report_mentions_not_assessed(self):
         pdf = self.root / "sample.pdf"
         pdf.write_bytes(b"%PDF-1.7")

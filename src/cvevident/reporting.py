@@ -69,6 +69,16 @@ def to_markdown(report: dict[str, Any]) -> str:
             lines.append(f"   - {details['description']}")
         if details.get("interpretation"):
             lines.append(f"   - Interpretation: {details['interpretation']}")
+        # Structural locations are part of the evidence provenance. They are logical
+        # object-graph paths, not byte offsets, and should remain visible in reports.
+        object_path = details.get("object_path")
+        if isinstance(object_path, str) and object_path:
+            lines.append(f"   - Object path: `{object_path}`")
+        object_reference = details.get("object_reference")
+        if isinstance(object_reference, str) and object_reference:
+            lines.append(f"   - Object reference: `{object_reference}`")
+        if details.get("path_truncated") is True:
+            lines.append("   - Object path was truncated to the configured reporting limit.")
     context = report.get("target_context", {})
     lines += ["", "## Product-context CVE candidates", ""]
     lines.append(f"Target product: `{context.get('target_product') or 'not supplied'}`")
