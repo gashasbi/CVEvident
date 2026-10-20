@@ -39,6 +39,16 @@ class TempProject(unittest.TestCase):
         path.write_text(json.dumps(payload), encoding="utf-8")
         return path
 
+    @contextlib.contextmanager
+    def capture_expected_pdf_parser_warning(self):
+        """Capture pypdf's expected warning for intentionally truncated test PDFs."""
+        with self.assertLogs("pypdf._reader", level="WARNING") as captured:
+            yield
+        self.assertTrue(
+            any("EOF marker not found" in record.getMessage() for record in captured.records),
+            "Expected pypdf to report the deliberately missing PDF EOF marker.",
+        )
+
     def nvd_payload(self, cve_id="CVE-2099-12345", product="pdf_reader", vendor="example", vulnerable=True):
         return {"vulnerabilities": [{"cve": {
             "id": cve_id,
@@ -79,7 +89,8 @@ class EntropyAndPDFTests(TempProject):
     def test_js_token_not_double_counted_inside_javascript(self):
         file_path = self.root / "sample.pdf"
         file_path.write_bytes(b"%PDF-1.7 /JavaScript")
-        report = analyze_pdf(file_path)
+        with self.capture_expected_pdf_parser_warning():
+            report = analyze_pdf(file_path)
         self.assertEqual(report["metrics"]["marker_counts"]["pdf.js_name"], 0)
         self.assertEqual(report["metrics"]["marker_counts"]["pdf.javascript_name"], 1)
 
@@ -124,7 +135,12 @@ class EntropyAndPDFTests(TempProject):
         writer = PdfWriter()
         writer.add_blank_page(width=72, height=72)
         # Test-only inert script. CVEvident parses but never executes this PDF action.
-        writer.add_js("void(0);")
+        # pypdf 6.21+ deprecates add_js(); retain compatibility with older local test environments.
+        if hasattr(writer, "add_open_action"):
+            from pypdf.actions import JavaScript
+            writer.add_open_action(JavaScript("void(0);"))
+        else:
+            writer.add_js("void(0);")
         with file_path.open("wb") as handle:
             writer.write(handle)
         report = analyze_pdf(file_path)
@@ -152,7 +168,8 @@ class EntropyAndPDFTests(TempProject):
     def test_incomplete_marker_fixture_keeps_lexical_results_on_parser_failure(self):
         file_path = self.root / "incomplete.pdf"
         file_path.write_bytes(b"%PDF-1.7\n<< /OpenAction /JavaScript >>")
-        report = analyze_pdf(file_path)
+        with self.capture_expected_pdf_parser_warning():
+            report = analyze_pdf(file_path)
         self.assertEqual(report["metrics"]["marker_counts"]["pdf.open_action_name"], 1)
         self.assertEqual(report["structural_analysis"]["status"], "failed")
         self.assertEqual(report["assessment"]["verdict"], "not_assessed")
@@ -361,7 +378,8 @@ class ReportAndCLITests(TempProject):
         # object rather than creating an OS-level filename that is not portable.
         pdf = self.root / "sample.pdf"
         pdf.write_bytes(b"%PDF-1.7")
-        report = analyze_pdf(pdf)
+        with self.capture_expected_pdf_parser_warning():
+            report = analyze_pdf(pdf)
         report["file"]["filename"] = "<script>alert(1)</script>.pdf"
         rendered = to_html(report)
         self.assertNotIn("<script>alert(1)</script>", rendered)
@@ -370,7 +388,8 @@ class ReportAndCLITests(TempProject):
     def test_markdown_report_mentions_not_assessed(self):
         pdf = self.root / "sample.pdf"
         pdf.write_bytes(b"%PDF-1.7")
-        rendered = to_markdown(analyze_pdf(pdf))
+        with self.capture_expected_pdf_parser_warning():
+            rendered = to_markdown(analyze_pdf(pdf))
         self.assertIn("not_assessed", rendered)
         self.assertIn("not a malware verdict", rendered)
 
@@ -394,7 +413,8 @@ class ReportAndCLITests(TempProject):
         pdf = self.root / "sample.pdf"
         pdf.write_bytes(b"%PDF-1.7 /OpenAction")
         output = self.root / "reports" / "report.md"
-        result = main(["--db", str(self.db), "analyze", str(pdf), "--format", "markdown", "--output", str(output)])
+        with self.capture_expected_pdf_parser_warning():
+            result = main(["--db", str(self.db), "analyze", str(pdf), "--format", "markdown", "--output", str(output)])
         self.assertEqual(result, 0)
         self.assertTrue(output.exists())
         self.assertIn("CVEvident Analysis Report", output.read_text(encoding="utf-8"))
