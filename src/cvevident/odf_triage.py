@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 from xml.etree import ElementTree
 
 from .file_input import read_file
+from .archive_limits import bounded_zip_data, ensure_zip_entry_limit
 from .office_triage import (
     MAX_ARCHIVE_ENTRIES, MAX_COMPRESSION_RATIO, MAX_PART_EXAMPLES,
     MAX_TOTAL_UNCOMPRESSED_BYTES, MAX_TOTAL_XML_BYTES, MAX_XML_PART_BYTES,
@@ -39,6 +40,7 @@ _URL_SCHEME = re.compile(r"^[a-z][a-z0-9+.-]*:", re.I)
 def is_opendocument_package(data: bytes) -> bool:
     """Return True only when a ZIP has a recognized ODF mimetype part."""
     try:
+        ensure_zip_entry_limit(data, MAX_ARCHIVE_ENTRIES)
         with zipfile.ZipFile(io.BytesIO(data), "r") as archive:
             infos = archive.infolist()
             if not infos or infos[0].filename != "mimetype":
@@ -105,7 +107,10 @@ def analyze_opendocument(path: str, max_bytes: int = 100 * 1024 * 1024,
     data = file_input.data
     suffix = file_input.path.suffix.lower()
     try:
-        archive = zipfile.ZipFile(io.BytesIO(data), "r")
+        bounded_data, entry_count, declared_bytes, entry_limit_reached = bounded_zip_data(
+            data, max_archive_entries
+        )
+        archive = zipfile.ZipFile(io.BytesIO(bounded_data), "r")
     except (zipfile.BadZipFile, OSError, ValueError) as exc:
         message = f"OpenDocument ZIP package could not be opened: {_safe_text(exc)}"
         return _base_report(file_input, "failed" if suffix in ODF_EXTENSIONS else "unsupported", message)
@@ -114,11 +119,8 @@ def analyze_opendocument(path: str, max_bytes: int = 100 * 1024 * 1024,
     partial = False
     with archive:
         all_infos = archive.infolist()
-        entry_count = len(all_infos)
-        declared_bytes = sum(max(0, int(info.file_size)) for info in all_infos)
-        if entry_count > max_archive_entries:
+        if entry_limit_reached:
             warnings.append(f"Package has {entry_count} entries; only the first {max_archive_entries} were considered.")
-            all_infos = all_infos[:max_archive_entries]
             partial = True
         if declared_bytes > max_total_uncompressed_bytes:
             warnings.append("Declared uncompressed package size exceeds the configured analysis budget.")

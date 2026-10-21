@@ -17,6 +17,7 @@ from urllib.parse import unquote, urlsplit
 from xml.etree import ElementTree
 
 from .file_input import read_file
+from .archive_limits import bounded_zip_data, ensure_zip_entry_limit, parse_xml_bounded
 
 # The first OOXML families CVEvident supports. The old binary CFB formats (.doc,
 # .xls, .ppt) are deliberately not accepted as OOXML and need a separate analyzer.
@@ -114,10 +115,10 @@ def _resolve_package_relationship_target(target: str) -> str | None:
 def _parse_xml(data: bytes) -> ElementTree.Element:
     # Office package XML should not need DTDs/entities. Reject them before parsing to
     # avoid entity-expansion risks; the finding remains a partial-analysis condition.
-    upper = data.upper()
+    upper = data.upper().replace(b"\x00", b"")
     if b"<!DOCTYPE" in upper or b"<!ENTITY" in upper:
         raise ValueError("DTD/entity declarations are not processed")
-    return ElementTree.fromstring(data)
+    return parse_xml_bounded(data)
 
 
 def _base_report(file_input: Any, status: str, warning: str) -> dict[str, Any]:
@@ -210,7 +211,10 @@ def analyze_office(
         return _base_report(file_input, "failed" if suffix in OFFICE_EXTENSIONS else "unsupported", message)
 
     try:
-        archive = zipfile.ZipFile(io.BytesIO(data), "r")
+        bounded_data, entry_count, declared_uncompressed, entry_limit_reached = bounded_zip_data(
+            data, max_archive_entries
+        )
+        archive = zipfile.ZipFile(io.BytesIO(bounded_data), "r")
     except (zipfile.BadZipFile, OSError, ValueError) as exc:
         return _base_report(file_input, "failed", f"Office package container could not be opened: {_safe_text(exc, 240)}")
 
@@ -218,11 +222,8 @@ def analyze_office(
     partial = False
     with archive:
         all_infos = archive.infolist()
-        entry_count = len(all_infos)
-        declared_uncompressed = sum(max(0, int(info.file_size)) for info in all_infos)
-        if entry_count > max_archive_entries:
+        if entry_limit_reached:
             warnings.append(f"Archive has {entry_count} entries; only the first {max_archive_entries} entries were considered.")
-            all_infos = all_infos[:max_archive_entries]
             partial = True
         if declared_uncompressed > max_total_uncompressed_bytes:
             warnings.append(
