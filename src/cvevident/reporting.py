@@ -229,6 +229,64 @@ def to_markdown(report: dict[str, Any]) -> str:
         object_reference = details.get("object_reference")
         if isinstance(object_reference, str) and object_reference:
             lines.append(f"   - Object reference: `{object_reference}`")
+        evidence_id = item.get("evidence_id")
+        if isinstance(evidence_id, str) and evidence_id:
+            lines.append(f"   - Evidence ID: `{evidence_id}` (report-local reference)")
+        evidence_class = item.get("evidence_class")
+        if isinstance(evidence_class, str) and evidence_class:
+            lines.append(f"   - Evidence class: `{evidence_class}`; origin: `{item.get('evidence_origin', 'unknown')}`")
+        locator = item.get("source_locator")
+        if isinstance(locator, dict):
+            locator_kind = _report_single_line(locator.get("kind", "unknown"))
+            locator_precision = _report_single_line(locator.get("precision", "unknown"))
+            locator_value = None
+            if locator.get("byte_offsets") is not None:
+                locator_value = f"byte offsets {locator.get('byte_offsets')}"
+                if locator.get("offsets_truncated"):
+                    locator_value += " (additional occurrences omitted)"
+            elif locator.get("object_path") or locator.get("object_reference"):
+                locator_value = f"{locator.get('object_path') or '(path unavailable)'}; object {locator.get('object_reference') or '(reference unavailable)'}"
+            elif locator.get("member_names"):
+                locator_value = ", ".join(str(name) for name in locator.get("member_names", [])[:10])
+                if locator.get("member_list_is_bounded"):
+                    locator_value += ", … (member list bounded)"
+            elif locator.get("package_member"):
+                locator_value = str(locator.get("package_member"))
+                if locator.get("element"):
+                    locator_value += f"; element {locator.get('element')}"
+                if locator.get("target"):
+                    locator_value += f"; target {locator.get('target')}"
+            elif locator.get("cve_id"):
+                locator_value = f"{locator.get('cve_id')} via {locator.get('retrieval_method') or 'unknown retrieval method'}"
+                if locator.get("target_product"):
+                    locator_value += f"; target product: {locator.get('target_product')}"
+                if locator.get("matched_criteria"):
+                    locator_value += f"; matched criteria: {str(locator.get('matched_criteria'))[:300]}"
+                query_terms = locator.get("matching_query_terms") or []
+                if query_terms:
+                    locator_value += "; query terms: " + ", ".join(str(term) for term in query_terms[:10])
+            elif locator.get("sample_id"):
+                locator_value = str(locator.get("sample_id"))
+                if locator.get("source_name"):
+                    locator_value += f"; source: {locator.get('source_name')}"
+                if locator.get("label_basis"):
+                    locator_value += f"; label basis: {locator.get('label_basis')}"
+                if locator.get("source_url"):
+                    locator_value += f"; source URL: {str(locator.get('source_url'))[:240]}"
+            elif locator.get("inventory_ordinal") is not None:
+                locator_value = f"inventory entry {locator.get('inventory_ordinal')}: {locator.get('name')}"
+                if locator.get("entry_type"):
+                    locator_value += f"; type: {locator.get('entry_type')}"
+                if locator.get("declared_size_bytes") is not None:
+                    locator_value += f"; declared size: {locator.get('declared_size_bytes')} bytes"
+            elif locator.get("byte_range_end_exclusive") is not None:
+                locator_value = f"bytes [0, {locator.get('byte_range_end_exclusive')})"
+            else:
+                locator_value = _report_single_line(locator.get("limitation", "No narrower location was emitted."))
+            lines.append(f"   - Source locator: `{locator_kind}`; precision: `{locator_precision}`; {_report_single_line(locator_value)}")
+            locator_limitation = locator.get("limitation")
+            if locator_limitation:
+                lines.append(f"      - Locator limitation: {_report_single_line(locator_limitation)}")
         if details.get("path_truncated") is True:
             lines.append("   - Object path was truncated to the configured reporting limit.")
     context = report.get("target_context", {})

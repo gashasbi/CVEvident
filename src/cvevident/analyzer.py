@@ -9,6 +9,7 @@ from typing import Any
 from . import __version__
 from .db import connect
 from .evidence_engine import build_cve_associations, build_product_context, evidence_summary
+from .evidence_trace import append_product_context_evidence, append_reported_source_evidence, finalize_evidence_traceability
 from .pdf_triage import analyze_pdf
 from .office_triage import LEGACY_OFFICE_EXTENSIONS, OFFICE_EXTENSIONS, analyze_office
 from .legacy_office_triage import OLE_SIGNATURE, analyze_legacy_office
@@ -131,6 +132,9 @@ def analyze_file(path: str | Path, db_path: str | Path | None = None,
             },
         })
     report["target_context"] = build_product_context(target_product, str(db_path) if db_path else None, candidate_limit)
+    append_product_context_evidence(report)
+    append_reported_source_evidence(report)
+    finalize_evidence_traceability(report)
     report["cve_associations"] = build_cve_associations(
         report["reference_sample_matches"], report["target_context"]
     )

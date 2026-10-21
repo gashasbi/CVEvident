@@ -57,6 +57,19 @@ def _count_pdf_name(data: bytes, name: bytes) -> int:
     return len(re.findall(pattern, data))
 
 
+def _find_pdf_name_offsets(data: bytes, name: bytes, limit: int = 32) -> tuple[list[int], bool]:
+    """Return bounded zero-based offsets for raw lexical matches, never semantic claims."""
+    pattern = re.escape(name) + rb"(?=$|[\x00\x09\x0a\x0c\x0d\x20\x28\x29<>\[\]{}/%])"
+    offsets: list[int] = []
+    truncated = False
+    for match in re.finditer(pattern, data):
+        if len(offsets) >= limit:
+            truncated = True
+            break
+        offsets.append(match.start())
+    return offsets, truncated
+
+
 def analyze_pdf(path: str | Path, max_bytes: int = 100 * 1024 * 1024) -> dict[str, Any]:
     file_input = read_file(path, max_bytes=max_bytes)
     file_path = file_input.path
@@ -85,12 +98,16 @@ def analyze_pdf(path: str | Path, max_bytes: int = 100 * 1024 * 1024) -> dict[st
     for marker, (key, description) in PDF_MARKERS.items():
         count = marker_counts[key]
         if count:
+            byte_offsets, byte_offsets_truncated = _find_pdf_name_offsets(data, marker)
             evidence.append({
                 "evidence_type": "pdf_lexical_marker", "key": key, "value": count,
                 "severity": "info",
                 "details": {
                     "description": description,
                     "marker_hex": marker.hex(),
+                    "byte_offsets": byte_offsets,
+                    "byte_offsets_truncated": byte_offsets_truncated,
+                    "offset_basis": "zero-based byte offsets from the beginning of the original input file",
                     "interpretation": "presence is contextual only; the name can occur in benign PDFs",
                 },
             })

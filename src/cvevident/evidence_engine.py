@@ -88,6 +88,8 @@ def build_cve_associations(reference_sample_matches: list[dict[str, Any]],
                 "evidence_reference": {
                     "evidence_type": "reference_sample_match",
                     "key": sample.get("sample_id"),
+                    "evidence_id": sample.get("evidence_id"),
+                    "resolution": "resolved" if sample.get("evidence_id") else "unresolved",
                 },
                 "interpretation": (
                     "The file SHA-256 exactly matches this registered sample. The CVE link inherits "
@@ -115,6 +117,13 @@ def build_cve_associations(reference_sample_matches: list[dict[str, Any]],
             "version_end_including": candidate.get("version_end_including"),
             "version_end_excluding": candidate.get("version_end_excluding"),
             "score_semantics": "lexical_product_retrieval_score_not_probability",
+            "retrieval_method": target_context.get("retrieval_method"),
+            "evidence_reference": {
+                "evidence_type": "product_context_candidate",
+                "key": cve_id,
+                "evidence_id": candidate.get("evidence_id"),
+                "resolution": "resolved" if candidate.get("evidence_id") else "unresolved",
+            },
             "interpretation": (
                 "Product-context retrieval only. The file does not establish that this product or version "
                 "is present, and this match does not attribute the file to the CVE."
@@ -149,9 +158,16 @@ def build_cve_associations(reference_sample_matches: list[dict[str, Any]],
 
 def evidence_summary(evidence: list[dict[str, Any]]) -> dict[str, Any]:
     counts: dict[str, int] = {}
+    class_counts: dict[str, int] = {}
+    locator_counts: dict[str, int] = {}
     for item in evidence:
         kind = str(item.get("evidence_type", "unknown"))
         counts[kind] = counts.get(kind, 0) + 1
+        evidence_class = str(item.get("evidence_class", "unclassified"))
+        class_counts[evidence_class] = class_counts.get(evidence_class, 0) + 1
+        locator = item.get("source_locator") or {}
+        locator_kind = str(locator.get("kind", "unlocated")) if isinstance(locator, dict) else "unlocated"
+        locator_counts[locator_kind] = locator_counts.get(locator_kind, 0) + 1
     marker_hits = [
         {"key": item["key"], "count": item.get("value")}
         for item in evidence if item.get("evidence_type") == "pdf_lexical_marker"
@@ -159,6 +175,8 @@ def evidence_summary(evidence: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "evidence_count": len(evidence),
         "evidence_counts_by_type": counts,
+        "evidence_counts_by_class": class_counts,
+        "evidence_counts_by_source_locator": locator_counts,
         "pdf_lexical_markers_observed": marker_hits,
         "malware_verdict": "not_assessed",
         "cve_attribution": "not_assessed",
