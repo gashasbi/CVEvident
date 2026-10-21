@@ -121,9 +121,20 @@ class LegacyOfficeTests(unittest.TestCase):
         self.assertTrue(any("cycle" in warning for warning in report["warnings"]))
 
     def test_directory_inventory_is_bounded(self):
-        report = self.analyze("many.doc", build_cfb([("Root Entry", 5), ("WordDocument", 2)]))
-        self.assertLessEqual(len(report["legacy_office_analysis"]["directory_inventory"]), 300)
+        names = [("Root Entry", 5), ("WordDocument", 2)]
+        names.extend((f"ExtraStream{i:03d}", 2) for i in range(299))
+        report = self.analyze("many.doc", build_cfb(names))
+        analysis = report["legacy_office_analysis"]
 
+        self.assertEqual(analysis["directory_entry_count"], 301)
+        self.assertEqual(len(analysis["directory_inventory"]), 300)
+        self.assertEqual(analysis["status"], "partial")
+        self.assertTrue(analysis["truncated"])
+        self.assertTrue(analysis["features"]["directory_inventory_truncated"])
+
+        warning = "Directory inventory was capped at 300 entries."
+        self.assertIn(warning, analysis["warnings"])
+        self.assertIn(warning, report["warnings"])
 
     def test_empty_directory_chain_preserves_error_and_truncation(self):
         data = bytearray(build_cfb([("Root Entry", 5), ("WordDocument", 2)]))

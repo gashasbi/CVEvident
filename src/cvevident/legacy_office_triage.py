@@ -284,8 +284,15 @@ def analyze_legacy_office(path: str, max_bytes: int = 100 * 1024 * 1024) -> dict
 
     entries, entries_truncated, parse_warnings = _parse_directory(directory_bytes)
     warnings.extend(parse_warnings)
+
+    inventory_truncated = entries_truncated or len(entries) > _MAX_INVENTORY
+
     if entries_truncated:
         warnings.append("Directory entry inventory was capped at the configured maximum.")
+        partial = True
+    if len(entries) > _MAX_INVENTORY:
+        warnings.append(f"Directory inventory was capped at {_MAX_INVENTORY} entries.")
+    if inventory_truncated:
         partial = True
     if parse_warnings:
         partial = True
@@ -336,7 +343,7 @@ def analyze_legacy_office(path: str, max_bytes: int = 100 * 1024 * 1024) -> dict
         "external_link_stream_name_count": len(external_link_names),
         "encrypted_office_container_present": bool(encrypted_container),
         "directory_chain_truncated": bool(chain_partial),
-        "directory_inventory_truncated": bool(entries_truncated),
+        "directory_inventory_truncated": bool(inventory_truncated),
     }
     if family is None:
         # The directory metadata is still useful even when stream-family identity is unknown.
@@ -381,7 +388,7 @@ def analyze_legacy_office(path: str, max_bytes: int = 100 * 1024 * 1024) -> dict
             "mini_fat_sector_count_declared": num_mini_fat_sectors,
             "directory_entry_count": len(entries), "stream_count": len(stream_entries),
             "storage_count": len(storage_entries), "directory_chain_truncated": chain_partial,
-            "truncated": bool(partial or entries_truncated),
+            "truncated": bool(partial or entries_truncated or inventory_truncated),
             "macro_enabled_format": bool(vba_present), "vba_project_present": bool(vba_present),
             "encrypted_content_present": bool(encrypted_container),
             "extension_matches_detected_family": extension_matches,
