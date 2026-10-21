@@ -33,6 +33,10 @@ def to_markdown(report: dict[str, Any]) -> str:
         "",
     ]
     office = report.get("office_analysis", {})
+    legacy_office = report.get("legacy_office_analysis", {})
+    rtf = report.get("rtf_analysis", {})
+    odf = report.get("odf_analysis", {})
+    non_pdf_analysis = bool(office or legacy_office or rtf or odf)
     if office:
         lines += [
             f"- ZIP entries declared: `{office.get('container_entry_count', 0)}`",
@@ -76,6 +80,103 @@ def to_markdown(report: dict[str, Any]) -> str:
         if office.get("warnings"):
             lines += ["", "### Office parser notes", ""]
             lines.extend(f"- {_report_single_line(warning)}" for warning in office["warnings"])
+    elif legacy_office:
+        lines += [
+            f"- OLE/CFB sector size: `{legacy_office.get('sector_size')}`",
+            f"- Directory entries: `{legacy_office.get('directory_entry_count', 0)}`",
+            f"- Streams: `{legacy_office.get('stream_count', 0)}`",
+            f"- Storages: `{legacy_office.get('storage_count', 0)}`",
+            "",
+            "## Legacy Office (OLE/CFB) analysis",
+            "",
+            f"- Parser status: `{legacy_office.get('status', 'unknown')}`",
+            f"- Detected family: `{legacy_office.get('family', 'unknown')}`",
+            f"- Detected format: `{legacy_office.get('format_id', 'unknown')}`",
+            f"- Macro/VBA indicators present: `{legacy_office.get('vba_project_present')}`",
+            f"- Encrypted Office container indicated: `{legacy_office.get('encrypted_content_present')}`",
+            f"- Analysis truncated: `{legacy_office.get('truncated', False)}`",
+            "",
+            "Only bounded OLE/CFB header and directory metadata were inspected. Stream bodies and VBA source were not parsed or executed.",
+        ]
+        features = legacy_office.get("features", {})
+        if features:
+            lines += ["", "| Legacy Office indicator | Observed value |", "|---|---:|"]
+            for key, value in sorted(features.items()):
+                if value:
+                    lines.append(f"| `{_report_single_line(key)}` | `{_report_single_line(value)}` |")
+        inventory = legacy_office.get("directory_inventory", [])
+        if inventory:
+            lines += ["", "### OLE/CFB directory inventory (bounded)", "", "| Name | Type | Declared size |", "|---|---|---:|"]
+            for entry in inventory[:100]:
+                name = _report_single_line(entry.get("name", "")).replace("|", "\\|")
+                lines.append(f"| `{name}` | `{entry.get('type', 'unknown')}` | `{entry.get('declared_size_bytes', 0)}` |")
+        if legacy_office.get("warnings"):
+            lines += ["", "### Legacy Office parser notes", ""]
+            lines.extend(f"- {_report_single_line(warning)}" for warning in legacy_office["warnings"])
+    elif rtf:
+        lines += [
+            f"- RTF bytes scanned: `{rtf.get('bytes_scanned', 0)}`",
+            f"- Maximum group nesting: `{rtf.get('maximum_group_depth', 0)}`",
+            "",
+            "## RTF analysis",
+            "",
+            f"- Parser status: `{rtf.get('status', 'unknown')}`",
+            f"- RTF header found: `{rtf.get('header_found')}`",
+            f"- RTF version: `{rtf.get('rtf_version')}`",
+            f"- Group balance value: `{rtf.get('group_balance')}`",
+            f"- Analysis truncated: `{rtf.get('truncated', False)}`",
+            "",
+            "RTF control words and field instructions are lexical/context indicators. Embedded objects and field targets are not opened or executed.",
+        ]
+        features = rtf.get("features", {})
+        if features:
+            lines += ["", "| RTF indicator | Observed value |", "|---|---:|"]
+            for key, value in sorted(features.items()):
+                if value:
+                    lines.append(f"| `{_report_single_line(key)}` | `{_report_single_line(value)}` |")
+        examples = rtf.get("field_instruction_examples", [])
+        if examples:
+            lines += ["", "### Field-instruction text examples (not executed)", ""]
+            lines.extend(f"- `{_report_single_line(example)}`" for example in examples[:10])
+        if rtf.get("warnings"):
+            lines += ["", "### RTF parser notes", ""]
+            lines.extend(f"- {_report_single_line(warning)}" for warning in rtf["warnings"])
+    elif odf:
+        lines += [
+            f"- ZIP entries declared: `{odf.get('container_entry_count', 0)}`",
+            f"- Declared uncompressed bytes: `{odf.get('declared_uncompressed_bytes', 0)}`",
+            f"- XML parts inspected: `{odf.get('xml_parts_inspected', 0)}`",
+            f"- XML bytes inspected: `{odf.get('xml_bytes_inspected', 0)}`",
+            "",
+            "## OpenDocument package analysis",
+            "",
+            f"- Parser status: `{odf.get('status', 'unknown')}`",
+            f"- Detected format: `{odf.get('format_id', 'unknown')}`",
+            f"- Family: `{odf.get('family', 'unknown')}`",
+            f"- Mimetype: `{_report_single_line(odf.get('mimetype', 'unknown'))}`",
+            f"- Main part: `{_report_single_line(odf.get('main_part', 'content.xml'))}`",
+            f"- Mimetype first and uncompressed: `{odf.get('mimetype_first_and_uncompressed')}`",
+            f"- Analysis truncated: `{odf.get('truncated', False)}`",
+            "",
+            "OpenDocument scripts, macros, external references and embedded objects are contextual observations only.",
+        ]
+        features = odf.get("features", {})
+        if features:
+            lines += ["", "| OpenDocument indicator | Observed value |", "|---|---:|"]
+            for key, value in sorted(features.items()):
+                if value:
+                    lines.append(f"| `{_report_single_line(key)}` | `{_report_single_line(value)}` |")
+        refs = odf.get("external_references", [])
+        if refs:
+            lines += ["", "### External references (not opened/fetched)", "", "| Part | Element | Target |", "|---|---|---|"]
+            for ref in refs[:25]:
+                part = _report_single_line(ref.get("part", "")).replace("|", "\\|")
+                element = _report_single_line(ref.get("element", "")).replace("|", "\\|")
+                target = _report_single_line(ref.get("target", "")).replace("|", "\\|")
+                lines.append(f"| `{part}` | `{element}` | `{target}` |")
+        if odf.get("warnings"):
+            lines += ["", "### OpenDocument parser notes", ""]
+            lines.extend(f"- {_report_single_line(warning)}" for warning in odf["warnings"])
     else:
         lines += [
             f"- PDF header found: `{metrics.get('pdf_header_found')}`",
@@ -107,7 +208,7 @@ def to_markdown(report: dict[str, Any]) -> str:
         for key in selected:
             if key in features:
                 lines.append(f"| `{key}` | `{features[key]}` |")
-    if not office:
+    if not non_pdf_analysis:
         local = metrics.get("local_byte_entropy", {})
         lines += [
             f"- Local entropy mean / max / min: `{local.get('mean')}` / `{local.get('max')}` / `{local.get('min')}`",

@@ -237,14 +237,14 @@ class OfficeTriageTests(unittest.TestCase):
         self.assertEqual(report["office_analysis"]["status"], "partial")
         self.assertTrue(any("per-part limit" in warning for warning in report["warnings"]))
 
-    def test_legacy_binary_office_is_explicitly_unsupported(self):
+    def test_truncated_legacy_binary_office_is_explicitly_failed_by_cfb_analyzer(self):
         path = self.root / "legacy.doc"
         path.write_bytes(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"legacy fixture")
         db_path = self.root / "legacy.sqlite3"
         init_db(db_path)
         report = analyze_file(path, db_path=db_path)
-        self.assertEqual(report["office_analysis"]["status"], "unsupported")
-        self.assertIn("OLE/CFB", report["office_analysis"]["warnings"][0])
+        self.assertEqual(report["legacy_office_analysis"]["status"], "failed")
+        self.assertIn("header", report["legacy_office_analysis"]["warnings"][0].lower())
 
 
 

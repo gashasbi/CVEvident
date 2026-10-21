@@ -36,7 +36,7 @@ def _write_output(content: str, output: str | None) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="cvevident",
-        description="Local-first, evidence-led static PDF and Office Open XML triage with local CVE context.",
+        description="Local-first, evidence-led static triage for PDF, Office and OpenDocument files with local CVE context.",
     )
     parser.add_argument("--version", action="version", version=f"CVEvident {__version__}")
     parser.add_argument("--db", default=str(default_db_path()), help="SQLite path (must appear before the subcommand)")
@@ -82,13 +82,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser(
         "analyze",
-        help="Run bounded static triage on supported PDF or modern Office Open XML files",
+        help="Run bounded static triage on supported PDF, Office, RTF or OpenDocument files",
         epilog=(
-            "Office Open XML support: Word .docx/.docm/.dotx/.dotm; "
+            "Office Open XML: Word .docx/.docm/.dotx/.dotm; "
             "Excel .xlsx/.xlsm/.xltx/.xltm/.xlsb/.xlam; "
             "PowerPoint .pptx/.pptm/.ppsx/.ppsm/.potx/.potm/.ppam/.sldx/.sldm. "
-            "Legacy binary Office formats (.doc/.xls/.ppt) are not supported. "
-            "See docs/office-triage.md for observation limits and safety boundaries."
+            "Legacy OLE/CFB Office: .doc/.xls/.ppt and related variants (bounded directory metadata only). "
+            "Also supports static RTF (.rtf) and OpenDocument .odt/.ott/.ods/.ots/.odp/.otp. "
+            "See docs/office-triage.md and docs/legacy-and-open-document-triage.md for limits."
         ),
     )
     p.add_argument("file")

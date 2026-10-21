@@ -11,6 +11,9 @@ from .db import connect
 from .evidence_engine import build_cve_associations, build_product_context, evidence_summary
 from .pdf_triage import analyze_pdf
 from .office_triage import LEGACY_OFFICE_EXTENSIONS, OFFICE_EXTENSIONS, analyze_office
+from .legacy_office_triage import OLE_SIGNATURE, analyze_legacy_office
+from .odf_triage import ODF_EXTENSIONS, analyze_opendocument
+from .rtf_triage import RTF_EXTENSIONS, analyze_rtf, has_rtf_signature
 from .store import lookup_reference_samples
 
 
@@ -30,18 +33,35 @@ def analyze_file(path: str | Path, db_path: str | Path | None = None,
         # Let the selected analyzer provide the established missing/unreadable-file error.
         prefix = b""
 
-    # Prefer content signatures over suffixes when a file is clearly a PDF or ZIP
-    # package. The OOXML analyzer validates its own content-type manifest before
-    # treating a ZIP as an Office document.
+    # Select a parser using content signatures first and suffixes only as a fallback.
+    # Every format-specific parser remains static and bounded; none executes content.
+    is_zip = prefix.startswith((b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08"))
     if b"%PDF-" in prefix[:1024]:
         report = analyze_pdf(input_path, max_bytes=max_bytes)
-    elif suffix in OFFICE_EXTENSIONS or suffix in LEGACY_OFFICE_EXTENSIONS or prefix.startswith(
-        (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
-    ):
+    elif prefix.startswith(OLE_SIGNATURE):
+        report = analyze_legacy_office(str(input_path), max_bytes=max_bytes)
+    elif has_rtf_signature(prefix):
+        report = analyze_rtf(str(input_path), max_bytes=max_bytes)
+    elif is_zip:
+        report = analyze_office(str(input_path), max_bytes=max_bytes)
+        # OpenDocument is ZIP-based but uses a mimetype member instead of the OOXML
+        # [Content_Types].xml manifest. An unsupported OOXML probe can fall back to ODF;
+        # a corrupt OOXML package (status=failed) is not silently reinterpreted.
+        if report.get("office_analysis", {}).get("status") == "unsupported":
+            odf_report = analyze_opendocument(str(input_path), max_bytes=max_bytes)
+            if odf_report.get("odf_analysis", {}).get("status") != "unsupported":
+                report = odf_report
+    elif suffix in RTF_EXTENSIONS:
+        report = analyze_rtf(str(input_path), max_bytes=max_bytes)
+    elif suffix in ODF_EXTENSIONS:
+        report = analyze_opendocument(str(input_path), max_bytes=max_bytes)
+    elif suffix in LEGACY_OFFICE_EXTENSIONS:
+        report = analyze_legacy_office(str(input_path), max_bytes=max_bytes)
+    elif suffix in OFFICE_EXTENSIONS:
         report = analyze_office(str(input_path), max_bytes=max_bytes)
     else:
-        # Preserve PDF triage's prior behavior for unknown/non-PDF inputs while the
-        # caller is migrating; future format analyzers can join this dispatch layer.
+        # Preserve the previous behavior for unknown/non-document inputs. The PDF
+        # analyzer will identify them as unknown_or_non_pdf and keeps legacy CLI stable.
         report = analyze_pdf(input_path, max_bytes=max_bytes)
 
     report["tool_version"] = __version__
@@ -55,11 +75,26 @@ def analyze_file(path: str | Path, db_path: str | Path | None = None,
                 "Office formula/field/link indicators when present in inspected XML parts",
             ],
             "not_implemented": [
-                "legacy binary OLE/CFB Office parsing", "VBA decompilation or execution",
+                "legacy binary OLE/CFB stream-body parsing", "VBA decompilation or execution",
                 "full semantic Word/Excel/PowerPoint parsing", "opening/fetching external targets",
                 "embedded-object extraction or execution", "dynamic analysis", "exploit detection",
                 "definitive CVE attribution",
             ],
+        }
+    elif report.get("legacy_office_analysis") is not None:
+        report["scope"] = {
+            "implemented": ["SHA-256 and bounded input read", "OLE/CFB header and FAT/directory metadata inspection", "legacy Office family indicators from directory stream names", "macro/embedded-object/external-link name indicators"],
+            "not_implemented": ["interpreting document stream bodies", "VBA source extraction/decompilation/execution", "full semantic Word/Excel/PowerPoint parsing", "embedded-object extraction", "dynamic analysis", "exploit detection", "definitive CVE attribution"],
+        }
+    elif report.get("rtf_analysis") is not None:
+        report["scope"] = {
+            "implemented": ["SHA-256 and bounded input read", "bounded RTF control-word/group scan", "field instruction and external-target string indicators", "bounded binary payload skipping"],
+            "not_implemented": ["full RTF semantic rendering", "executing field instructions", "opening external targets", "decoding/interpreting embedded OLE payloads", "dynamic analysis", "exploit detection", "definitive CVE attribution"],
+        }
+    elif report.get("odf_analysis") is not None:
+        report["scope"] = {
+            "implemented": ["SHA-256 and bounded input read", "ODF mimetype-based format identification", "bounded ZIP package inventory", "bounded XML inspection", "script/macro/embedded-object/external-reference indicators"],
+            "not_implemented": ["full semantic Writer/Calc/Impress parsing", "macro/script execution", "opening/fetching external targets", "embedded-object extraction", "dynamic analysis", "exploit detection", "definitive CVE attribution"],
         }
     else:
         report["scope"] = {
