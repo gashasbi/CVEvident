@@ -267,7 +267,20 @@ def analyze_legacy_office(path: str, max_bytes: int = 100 * 1024 * 1024) -> dict
         if chain_error:
             warnings.append(f"Directory chain: {chain_error}.")
     if not directory_bytes:
-        return _base_report(file_input, "failed", "OLE/CFB directory stream is unavailable or empty.")
+        message = "OLE/CFB directory stream is unavailable or empty."
+        report = _base_report(file_input, "failed", message)
+        analysis = report["legacy_office_analysis"]
+        analysis["truncated"] = bool(chain_partial)
+        analysis["features"]["directory_chain_truncated"] = bool(chain_partial)
+
+        # Preserve structural errors discovered before the directory read failed.
+        failure_warnings = [*warnings, message]
+        analysis["warnings"] = list(dict.fromkeys(failure_warnings))
+        report["warnings"] = list(dict.fromkeys([
+            *failure_warnings,
+            "Legacy Office analysis inspects bounded OLE/CFB header and directory metadata only; stream bodies and macros are not executed or extracted.",
+        ]))
+        return report
 
     entries, entries_truncated, parse_warnings = _parse_directory(directory_bytes)
     warnings.extend(parse_warnings)

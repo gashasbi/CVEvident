@@ -125,5 +125,19 @@ class LegacyOfficeTests(unittest.TestCase):
         self.assertLessEqual(len(report["legacy_office_analysis"]["directory_inventory"]), 300)
 
 
+    def test_empty_directory_chain_preserves_error_and_truncation(self):
+        data = bytearray(build_cfb([("Root Entry", 5), ("WordDocument", 2)]))
+        struct.pack_into("<I", data, 48, 2)
+
+        report = self.analyze("bad-start.doc", bytes(data))
+        analysis = report["legacy_office_analysis"]
+
+        self.assertEqual(analysis["status"], "failed")
+        self.assertTrue(analysis["truncated"])
+        self.assertTrue(analysis["features"]["directory_chain_truncated"])
+        self.assertTrue(any("Directory chain:" in warning for warning in analysis["warnings"]))
+        self.assertTrue(any("invalid or unavailable FAT entry" in warning for warning in analysis["warnings"]))
+        self.assertTrue(any("Directory chain:" in warning for warning in report["warnings"]))
+
 if __name__ == "__main__":
     unittest.main()
