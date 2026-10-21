@@ -47,7 +47,19 @@ def analyze_file(path: str | Path, db_path: str | Path | None = None,
         # OpenDocument is ZIP-based but uses a mimetype member instead of the OOXML
         # [Content_Types].xml manifest. An unsupported OOXML probe can fall back to ODF;
         # a corrupt OOXML package (status=failed) is not silently reinterpreted.
-        if report.get("office_analysis", {}).get("status") == "unsupported":
+        office_analysis = report.get("office_analysis", {})
+        office_status = office_analysis.get("status")
+        office_container_open_failed = office_status == "failed" and any(
+            "Office package container could not be opened" in warning
+            for warning in office_analysis.get("warnings", [])
+        )
+        # Unsupported ZIP packages may be ODF. Also let a malformed ZIP with an
+        # explicit ODF extension receive an ODF failure report; do not generally
+        # reinterpret failed OOXML manifests or relationships as OpenDocument.
+        should_try_odf = office_status == "unsupported" or (
+            suffix in ODF_EXTENSIONS and office_container_open_failed
+        )
+        if should_try_odf:
             odf_report = analyze_opendocument(str(input_path), max_bytes=max_bytes)
             if odf_report.get("odf_analysis", {}).get("status") != "unsupported":
                 report = odf_report

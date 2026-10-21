@@ -4,6 +4,7 @@ from __future__ import annotations
 import io
 import re
 import zipfile
+import zlib
 from collections import Counter
 from pathlib import PurePosixPath
 from typing import Any
@@ -47,8 +48,12 @@ def is_opendocument_package(data: bytes) -> bool:
             info = infos[0]
             if info.file_size > 256 or info.compress_type != zipfile.ZIP_STORED or info.flag_bits & 0x1:
                 return False
-            return archive.read(info).decode("ascii", errors="strict").strip() in ODF_MIME_TYPES
-    except (zipfile.BadZipFile, OSError, ValueError, UnicodeDecodeError, RuntimeError, NotImplementedError):
+            with archive.open(info, "r") as stream:
+                mimetype_data = stream.read(257)
+            if len(mimetype_data) > 256:
+                return False
+            return mimetype_data.decode("ascii", errors="strict").strip() in ODF_MIME_TYPES
+    except (zipfile.BadZipFile, OSError, ValueError, UnicodeDecodeError, RuntimeError, NotImplementedError, zlib.error, EOFError):
         return False
 
 
@@ -153,8 +158,12 @@ def analyze_opendocument(path: str, max_bytes: int = 100 * 1024 * 1024,
         try:
             if mime_info.file_size > 256 or (mime_info.compress_size and mime_info.file_size / mime_info.compress_size > MAX_COMPRESSION_RATIO):
                 raise ValueError("ODF mimetype member exceeds size or compression-ratio limits")
-            mimetype = archive.read(mime_info).decode("ascii", errors="strict").strip()
-        except (ValueError, UnicodeDecodeError, OSError, RuntimeError, NotImplementedError, zipfile.BadZipFile) as exc:
+            with archive.open(mime_info, "r") as stream:
+                mimetype_data = stream.read(257)
+            if len(mimetype_data) > 256:
+                raise ValueError("ODF mimetype member exceeds the 256-byte read limit")
+            mimetype = mimetype_data.decode("ascii", errors="strict").strip()
+        except (ValueError, UnicodeDecodeError, OSError, RuntimeError, NotImplementedError, zipfile.BadZipFile, zlib.error, EOFError) as exc:
             message = f"ODF mimetype member is invalid or unreadable: {_safe_text(exc)}"
             report = _base_report(file_input, "failed", message)
             report["odf_analysis"].update({"container_entry_count": entry_count,
@@ -211,11 +220,28 @@ def analyze_opendocument(path: str, max_bytes: int = 100 * 1024 * 1024,
                 warnings.append("Total XML inspection byte limit reached; remaining selected XML parts were skipped.")
                 partial = True
                 break
+            remaining_xml_budget = max_total_xml_bytes - xml_bytes_total
+            read_limit = min(max_xml_part_bytes, remaining_xml_budget)
             try:
-                xml_data = archive.read(info)
+                # Never decompress an XML member without a read bound. Read one
+                # extra byte only to detect a violated per-part or total budget.
+                with archive.open(info, "r") as stream:
+                    xml_data = stream.read(read_limit + 1)
+                if len(xml_data) > read_limit:
+                    if remaining_xml_budget <= max_xml_part_bytes:
+                        warnings.append(
+                            f"Total XML inspection byte limit reached while reading {name}; the part and remaining selected XML were skipped."
+                        )
+                        partial = True
+                        break
+                    warnings.append(f"XML part {name} expanded beyond the per-part read limit and was skipped.")
+                    partial = True
+                    continue
+                # Count bytes supplied to the XML parser even if parsing the
+                # document itself fails, so malformed XML cannot reset the budget.
                 xml_bytes_total += len(xml_data)
                 root = _parse_xml(xml_data)
-            except (ValueError, ElementTree.ParseError, OSError, RuntimeError, NotImplementedError, zipfile.BadZipFile) as exc:
+            except (ValueError, ElementTree.ParseError, OSError, RuntimeError, NotImplementedError, zipfile.BadZipFile, zlib.error, EOFError) as exc:
                 warnings.append(f"XML part {name} could not be safely parsed: {_safe_text(exc)}")
                 partial = True
                 continue
