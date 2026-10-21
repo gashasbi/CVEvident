@@ -267,21 +267,89 @@ def analyze_office(
             report["warnings"].extend(warnings)
             return report
 
+        # The XML inspection budget includes every parser input, including the
+        # manifest and root relationships required to identify the package format.
+        class _OfficeXmlInspectionLimit(Exception):
+            pass
+
+        xml_parser_bytes = 0
+        xml_parser_parts = 0
+        xml_bytes_inspected = 0
+        xml_parts_inspected = 0
+        pre_parsed_roots: dict[str, ElementTree.Element] = {}
+
+        def parse_xml_member(info: zipfile.ZipInfo, label: str) -> ElementTree.Element:
+            nonlocal xml_parser_bytes, xml_parser_parts
+            nonlocal xml_bytes_inspected, xml_parts_inspected
+
+            if info.file_size > max_xml_part_bytes:
+                raise ValueError(f"{label} exceeds the per-part limit ({max_xml_part_bytes} bytes)")
+            if info.compress_size and info.file_size / info.compress_size > MAX_COMPRESSION_RATIO:
+                raise ValueError(f"{label} exceeds the compression-ratio limit")
+            if xml_parser_parts >= max_xml_parts:
+                raise _OfficeXmlInspectionLimit(
+                    f"XML part-count limit ({max_xml_parts}) reached before parsing {label}."
+                )
+
+            remaining = max_total_xml_bytes - xml_parser_bytes
+            if remaining <= 0 or info.file_size > remaining:
+                raise _OfficeXmlInspectionLimit(
+                    f"Total XML inspection budget ({max_total_xml_bytes} bytes) reached before parsing {label}."
+                )
+
+            # Read no more than the declared member size plus one byte. The extra
+            # byte detects a ZIP member whose actual expansion exceeds its metadata.
+            read_limit = min(max_xml_part_bytes, remaining, max(0, int(info.file_size)))
+            with archive.open(info, "r") as stream:
+                part_data = stream.read(read_limit + 1)
+            if len(part_data) > max_xml_part_bytes:
+                raise ValueError(f"{label} expanded beyond the per-part limit")
+            if len(part_data) > info.file_size:
+                raise ValueError(f"{label} expanded beyond its declared ZIP member size")
+            if len(part_data) > remaining:
+                raise _OfficeXmlInspectionLimit(
+                    f"Total XML inspection budget ({max_total_xml_bytes} bytes) reached while reading {label}."
+                )
+
+            # Charge bytes and parts before XML parsing, so malformed XML cannot be
+            # used to repeatedly exceed the configured parser-input budget.
+            xml_parser_bytes += len(part_data)
+            xml_parser_parts += 1
+            root = _parse_xml(part_data)
+            xml_bytes_inspected += len(part_data)
+            xml_parts_inspected += 1
+            return root
+
+        def budget_limited_report(exc: _OfficeXmlInspectionLimit) -> dict[str, Any]:
+            message = (
+                "Office package XML inspection budget prevented complete analysis: "
+                f"{_safe_text(exc, 220)}"
+            )
+            report = _base_report(file_input, "partial", message)
+            report["office_analysis"].update({
+                "container_entry_count": entry_count,
+                "declared_uncompressed_bytes": declared_uncompressed,
+                "xml_parts_inspected": xml_parts_inspected,
+                "xml_bytes_inspected": xml_bytes_inspected,
+                "truncated": True,
+                "warnings": warnings + [message],
+            })
+            report["warnings"].extend(warnings)
+            return report
+
         content_types: dict[str, str] = {}
         selected_main: tuple[str, str, bool, str] | None = None
         try:
-            if content_types_info.file_size > max_xml_part_bytes:
-                raise ValueError("[Content_Types].xml exceeds the per-part XML size limit")
-            if content_types_info.compress_size and content_types_info.file_size / content_types_info.compress_size > MAX_COMPRESSION_RATIO:
-                raise ValueError("[Content_Types].xml exceeds the compression-ratio limit")
-            manifest_bytes = archive.read(content_types_info)
-            manifest_root = _parse_xml(manifest_bytes)
+            manifest_root = parse_xml_member(content_types_info, "[Content_Types].xml")
             for node in manifest_root.iter():
                 if _local_name(node.tag) == "Override":
                     part_name = _safe_text(node.attrib.get("PartName", ""), 500).lstrip("/")
                     content_type = _safe_text(node.attrib.get("ContentType", ""), 300).lower()
                     if part_name and content_type:
                         content_types[part_name] = content_type
+            del manifest_root
+        except _OfficeXmlInspectionLimit as exc:
+            return budget_limited_report(exc)
         except (zipfile.BadZipFile, OSError, RuntimeError, ValueError, ElementTree.ParseError, zlib.error, EOFError) as exc:
             message = f"Office package content-type manifest could not be parsed safely: {_safe_text(exc, 220)}"
             report = _base_report(file_input, "failed", message)
@@ -312,11 +380,8 @@ def analyze_office(
             return report
 
         try:
-            if root_rels_info.file_size > max_xml_part_bytes:
-                raise ValueError("root relationships part exceeds the per-part XML size limit")
-            if root_rels_info.compress_size and root_rels_info.file_size / root_rels_info.compress_size > MAX_COMPRESSION_RATIO:
-                raise ValueError("root relationships part exceeds the compression-ratio limit")
-            root_rels_root = _parse_xml(archive.read(root_rels_info))
+            root_rels_root = parse_xml_member(root_rels_info, "root relationships part")
+            pre_parsed_roots[root_rels_info.filename] = root_rels_root
             office_relationships = [
                 node for node in root_rels_root.iter()
                 if _local_name(node.tag) == "Relationship"
@@ -339,6 +404,8 @@ def analyze_office(
                     partial = True
                     continue
                 recognized_main_parts.append((mapped[0], mapped[1], mapped[2], target))
+        except _OfficeXmlInspectionLimit as exc:
+            return budget_limited_report(exc)
         except (zipfile.BadZipFile, OSError, RuntimeError, ValueError, ElementTree.ParseError, zlib.error, EOFError) as exc:
             message = f"Office package root relationships could not be parsed safely: {_safe_text(exc, 220)}"
             report = _base_report(file_input, "failed", message)
@@ -414,38 +481,27 @@ def analyze_office(
             "duplicate_member_name_count": len(duplicate_names),
         }
         relationships: list[dict[str, str]] = []
-        xml_parts_inspected = 0
-        xml_bytes_inspected = 0
         inspected_part_names: list[str] = []
         for info in xml_infos:
             if info.filename in duplicate_names or info.filename in unsafe_names or info.filename in encrypted_names:
                 continue
-            if info.file_size > max_xml_part_bytes:
-                warnings.append(f"XML part {_safe_text(info.filename, 180)} exceeds the per-part limit and was skipped.")
-                partial = True
+            if info.filename == "[Content_Types].xml":
+                # Already parsed for format identification and included in the shared budget.
+                inspected_part_names.append(_safe_text(info.filename, 240))
                 continue
-            if info.compress_size and info.file_size / info.compress_size > MAX_COMPRESSION_RATIO:
-                warnings.append(f"XML part {_safe_text(info.filename, 180)} exceeds the compression-ratio limit and was skipped.")
-                partial = True
-                continue
-            if xml_bytes_inspected + info.file_size > max_total_xml_bytes and info.filename != "[Content_Types].xml":
-                warnings.append("Total XML inspection budget reached; remaining XML parts were skipped.")
-                partial = True
-                break
-            try:
-                with archive.open(info, "r") as stream:
-                    part_data = stream.read(max_xml_part_bytes + 1)
-                if len(part_data) > max_xml_part_bytes:
-                    warnings.append(f"XML part {_safe_text(info.filename, 180)} expanded beyond its read limit and was skipped.")
+            if info.filename in pre_parsed_roots:
+                root = pre_parsed_roots.pop(info.filename)
+            else:
+                try:
+                    root = parse_xml_member(info, f"XML part {_safe_text(info.filename, 180)}")
+                except _OfficeXmlInspectionLimit as exc:
+                    warnings.append(_safe_text(exc, 240) + " Remaining XML parts were skipped.")
+                    partial = True
+                    break
+                except (zipfile.BadZipFile, OSError, RuntimeError, ValueError, ElementTree.ParseError, zlib.error, EOFError) as exc:
+                    warnings.append(f"XML part {_safe_text(info.filename, 180)} could not be safely parsed: {_safe_text(exc, 160)}")
                     partial = True
                     continue
-                root = _parse_xml(part_data)
-            except (zipfile.BadZipFile, OSError, RuntimeError, ValueError, ElementTree.ParseError, zlib.error, EOFError) as exc:
-                warnings.append(f"XML part {_safe_text(info.filename, 180)} could not be safely parsed: {_safe_text(exc, 160)}")
-                partial = True
-                continue
-            xml_bytes_inspected += len(part_data)
-            xml_parts_inspected += 1
             inspected_part_names.append(_safe_text(info.filename, 240))
 
             # Process a part immediately and discard its tree before reading the next
