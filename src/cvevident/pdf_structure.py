@@ -8,12 +8,129 @@ from __future__ import annotations
 import inspect
 import io
 from collections import Counter
+from functools import wraps
 from typing import Any
 
 _MAX_CONTAINERS = 20_000
 _MAX_DEPTH = 64
 _MAX_FINDINGS = 500
 _MAX_PATH_LENGTH = 1_024
+
+# CVEvident only needs a bounded structural view, not unrestricted PDF content
+# extraction. These limits apply to pypdf's parser and lazy object resolution too.
+_PDF_RESOURCE_LIMITS: dict[str, int | None | bool] = {
+    "maximum_declared_stream_length": 16 * 1024 * 1024,
+    "array_based_stream_maximum_output_length": 16 * 1024 * 1024,
+    "array_maximum_element_count": 50_000,
+    "dictionary_maximum_element_count": 50_000,
+    "jbig2_maximum_output_length": 16 * 1024 * 1024,
+    "lzw_maximum_output_length": 16 * 1024 * 1024,
+    "run_length_maximum_output_length": 16 * 1024 * 1024,
+    "zlib_maximum_output_length": 16 * 1024 * 1024,
+    "zlib_maximum_recovery_input_length": 2 * 1024 * 1024,
+    "brotli_maximum_output_length": 16 * 1024 * 1024,
+    "flate_maximum_columns": 250_000,
+    "flate_maximum_row_length": 4 * 1024 * 1024,
+    "image_maximum_buffer_size": 16 * 1024 * 1024,
+    "stream_filters_maximum_length": 8,
+    "stream_decoding_work_maximum_length": 64 * 1024 * 1024,
+    "stream_parsing_work_maximum_count": 500_000,
+    "xmp_maximum_input_length": 2 * 1024 * 1024,
+    "xmp_maximum_element_count": 25_000,
+    "outline_maximum_entries": 25_000,
+    "outline_maximum_depth": 64,
+    "page_tree_maximum_entries": 50_000,
+    "page_tree_maximum_depth": 64,
+    "form_fields_maximum_entries": 25_000,
+    "form_fields_maximum_depth": 64,
+    "xform_maximum_invocations_per_extraction": 1_000,
+    # Structural triage does not need the external JBIG2 executable.
+    "jbig2dec_binary": None,
+    "disable_legacy_handling": True,
+}
+
+_REQUIRED_PDF_RESOURCE_LIMITS = frozenset({
+    "maximum_declared_stream_length",
+    "array_based_stream_maximum_output_length",
+    "array_maximum_element_count",
+    "dictionary_maximum_element_count",
+    "jbig2_maximum_output_length",
+    "lzw_maximum_output_length",
+    "run_length_maximum_output_length",
+    "zlib_maximum_output_length",
+    "stream_filters_maximum_length",
+    "stream_decoding_work_maximum_length",
+    "stream_parsing_work_maximum_count",
+})
+
+
+def _with_pdf_resource_limits(function):
+    """Apply pypdf budgets for the full lifetime of structural parsing."""
+    @wraps(function)
+    def wrapped(data: bytes, is_pdf: bool) -> dict[str, Any]:
+        if not is_pdf:
+            return function(data, is_pdf)
+
+        try:
+            import pypdf
+        except Exception:
+            # Preserve analyze_pdf_structure's usual unavailable-parser result.
+            return function(data, is_pdf)
+
+        version = getattr(pypdf, "__version__", "unknown")
+        apply_configuration = getattr(pypdf, "apply_configuration", None)
+        configuration_type = getattr(pypdf, "Configuration", None)
+        if not callable(apply_configuration) or configuration_type is None:
+            result = _base_result("failed", version)
+            result["warnings"].append(
+                "PDF structural parsing was skipped because pypdf does not expose "
+                "the required resource-limit configuration API."
+            )
+            return result
+
+        try:
+            supported = set(inspect.signature(configuration_type).parameters)
+        except (TypeError, ValueError):
+            result = _base_result("failed", version)
+            result["warnings"].append(
+                "PDF structural parsing was skipped because pypdf resource-limit "
+                "support could not be verified."
+            )
+            return result
+
+        missing = _REQUIRED_PDF_RESOURCE_LIMITS - supported
+        if missing:
+            result = _base_result("failed", version)
+            result["warnings"].append(
+                "PDF structural parsing was skipped because pypdf is missing required "
+                "resource limits: " + ", ".join(sorted(missing)) + "."
+            )
+            return result
+
+        overrides = {
+            name: value for name, value in _PDF_RESOURCE_LIMITS.items()
+            if name in supported
+        }
+        try:
+            context = apply_configuration(**overrides)
+            # Separate context setup errors from parser failures. The analyzer below
+            # already translates parser failures into its normal failed result.
+            context.__enter__()
+        except Exception as exc:
+            result = _base_result("failed", version)
+            result["warnings"].append(
+                "PDF structural parsing was skipped because its resource limits "
+                f"could not be applied ({type(exc).__name__})."
+            )
+            return result
+
+        try:
+            return function(data, is_pdf)
+        finally:
+            # pypdf's context manager resets its context-local configuration here.
+            context.__exit__(None, None, None)
+
+    return wrapped
 
 _ANNOTATION_SUBTYPES = {
     "/Text", "/Link", "/FreeText", "/Line", "/Square", "/Circle", "/Polygon",
@@ -111,6 +228,7 @@ def _join_object_path(parent: str, segment: str, inherited_truncation: bool) -> 
     return path[: _MAX_PATH_LENGTH - 3] + "...", True
 
 
+@_with_pdf_resource_limits
 def analyze_pdf_structure(data: bytes, is_pdf: bool) -> dict[str, Any]:
     """Inspect PDF object dictionaries without executing actions or extracting stream bytes.
 
