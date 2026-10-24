@@ -11,6 +11,10 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .db import connect
+from .product_matching import (
+    assess_version_context, cpe23_components, classify_name_match,
+    normalize_product_text, product_tokens, split_product_version,
+)
 
 CVE_RE = re.compile(r"^CVE-\d{4}-\d{4,}$", re.IGNORECASE)
 
@@ -74,14 +78,9 @@ def _walk_cpe_matches(node: Any) -> Iterable[dict[str, Any]]:
 
 
 def _parse_cpe(criteria: str) -> tuple[str | None, str | None]:
-    # CPE 2.3 fields: cpe:2.3:<part>:<vendor>:<product>:<version>:...
-    # Escaped delimiters are not fully decoded here; original criteria is preserved.
-    parts = criteria.split(":")
-    if len(parts) >= 6 and parts[0] == "cpe" and parts[1] == "2.3":
-        vendor, product = parts[3], parts[4]
-        return (vendor if vendor not in {"", "*", "-"} else None,
-                product if product not in {"", "*", "-"} else None)
-    return None, None
+    """Extract decoded vendor/product fields while preserving original criteria separately."""
+    components = cpe23_components(criteria)
+    return components.get("vendor"), components.get("product")
 
 
 def _extract_products(item: dict[str, Any]) -> list[dict[str, Any]]:
@@ -411,43 +410,150 @@ def search_cves(query: str, db_path: str | Path | None = None, limit: int = 20) 
         return [dict(row) for row in conn.execute(sql, args).fetchall()]
 
 
-def search_product_cves(query: str, db_path: str | Path | None = None, limit: int = 20) -> list[dict[str, Any]]:
-    """Find CVEs whose NVD affected-product criteria lexically resemble the target product.
+def get_source_freshness(db_path: str | Path | None = None) -> dict[str, Any]:
+    """Summarize successful local imports without claiming upstream completeness.
 
-    This is a candidate retrieval aid, not CPE range evaluation or proof a particular
-    installed version is vulnerable. Product CPE criteria may have logical AND/OR context.
-
-    Important performance note: filter matching CPE rows in SQLite before materializing
-    Python objects. NVD databases can contain millions of affected-product rows; selecting
-    every row (including the large raw_json field) and filtering it in Python can exhaust
-    memory or make interactive terminals appear unresponsive.
+    NVD yearly feed imports are grouped as NVD; the per-source rows remain available
+    in the result so a caller can inspect the actual local coverage.
     """
-    import re
+    with connect(db_path) as conn:
+        rows = [dict(row) for row in conn.execute(
+            "SELECT source,last_success_at,last_attempt_at,records_seen,status,details "
+            "FROM source_sync ORDER BY source"
+        ).fetchall()]
 
-    terms = list(dict.fromkeys(tokenize(query)))
+    now = datetime.now(timezone.utc)
+
+    def parse_timestamp(value: Any) -> datetime | None:
+        if not isinstance(value, str) or not value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+        except ValueError:
+            return None
+
+    source_groups = {
+        "NVD": lambda name: name == "NVD" or name.startswith("NVD yearly "),
+        "CISA KEV": lambda name: name == "CISA KEV",
+        "FIRST EPSS": lambda name: name == "FIRST EPSS",
+    }
+    freshness: dict[str, Any] = {"as_of": now.replace(microsecond=0).isoformat(), "sources": {}}
+    thresholds = {"NVD": 30, "CISA KEV": 3, "FIRST EPSS": 3}
+
+    for canonical, predicate in source_groups.items():
+        group = [row for row in rows if predicate(str(row.get("source") or ""))]
+        successful = [row for row in group if parse_timestamp(row.get("last_success_at")) is not None]
+        latest_success = max(successful, key=lambda row: parse_timestamp(row.get("last_success_at")) or datetime.min.replace(tzinfo=timezone.utc), default=None)
+        latest_attempt = max(group, key=lambda row: parse_timestamp(row.get("last_attempt_at")) or datetime.min.replace(tzinfo=timezone.utc), default=None)
+        success_time = parse_timestamp(latest_success.get("last_success_at")) if latest_success else None
+        attempt_time = parse_timestamp(latest_attempt.get("last_attempt_at")) if latest_attempt else None
+        age_seconds = max(0, int((now - success_time).total_seconds())) if success_time else None
+        threshold = thresholds[canonical]
+        if age_seconds is None:
+            freshness_class = "unknown"
+        elif age_seconds <= threshold * 86400:
+            freshness_class = "fresh_by_local_import_age"
+        elif age_seconds <= threshold * 2 * 86400:
+            freshness_class = "aging_by_local_import_age"
+        else:
+            freshness_class = "stale_by_local_import_age"
+        latest_attempt_status = str(latest_attempt.get("status") or "unknown") if latest_attempt else "never_run"
+        if not group:
+            state = "never_run"
+        elif success_time is None:
+            state = "no_successful_local_import"
+        elif latest_attempt_status != "success" and attempt_time and attempt_time > success_time:
+            state = "last_attempt_not_successful"
+        else:
+            state = "available_from_local_import"
+        freshness["sources"][canonical] = {
+            "state": state,
+            "freshness_class": freshness_class,
+            "latest_attempt_status": latest_attempt_status,
+            "last_success_at": latest_success.get("last_success_at") if latest_success else None,
+            "last_attempt_at": latest_attempt.get("last_attempt_at") if latest_attempt else None,
+            "last_success_age_seconds": age_seconds,
+            "freshness_threshold_days": threshold,
+            "records_seen_on_latest_success": latest_success.get("records_seen") if latest_success else None,
+            "latest_success_details": latest_success.get("details") if latest_success else None,
+            "sync_record_count": len(group),
+            "local_sync_rows": [
+                {"source": row.get("source"), "status": row.get("status"),
+                 "last_success_at": row.get("last_success_at"), "last_attempt_at": row.get("last_attempt_at"),
+                 "records_seen": row.get("records_seen"), "details": row.get("details")}
+                for row in sorted(group, key=lambda item: str(item.get("source") or ""))
+            ],
+            "limitation": "Freshness is measured from local successful import timestamps; it does not prove complete or current upstream coverage.",
+        }
+    return freshness
+
+
+def _source_signal_snapshot(row: dict[str, Any], freshness: dict[str, Any]) -> dict[str, Any]:
+    sources = freshness.get("sources", {})
+    kev_freshness = sources.get("CISA KEV", {})
+    epss_freshness = sources.get("FIRST EPSS", {})
+    kev_listed = bool(row.get("cisa_kev"))
+    epss_available = row.get("epss_score") is not None
+    kev_state = (
+        "listed_in_local_kev_snapshot" if kev_listed
+        else "not_listed_in_successfully_imported_local_kev_snapshot"
+        if kev_freshness.get("state") in {"available_from_local_import", "last_attempt_not_successful"}
+        else "unknown_no_successful_local_kev_import"
+    )
+    epss_state = (
+        "score_available_in_local_record" if epss_available
+        else "no_score_in_local_record_after_successful_local_epss_import"
+        if epss_freshness.get("state") in {"available_from_local_import", "last_attempt_not_successful"}
+        else "unknown_no_successful_local_epss_import"
+    )
+    return {
+        "NVD": {
+            "cve_record_present": True,
+            "published": row.get("published"),
+            "modified": row.get("modified"),
+            "last_successful_local_import": sources.get("NVD", {}).get("last_success_at"),
+            "freshness_class": sources.get("NVD", {}).get("freshness_class", "unknown"),
+        },
+        "CISA KEV": {
+            "listed": kev_listed,
+            "date_added": row.get("kev_date_added"),
+            "state": kev_state,
+            "freshness_class": kev_freshness.get("freshness_class", "unknown"),
+        },
+        "FIRST EPSS": {
+            "score": row.get("epss_score"),
+            "percentile": row.get("epss_percentile"),
+            "state": epss_state,
+            "freshness_class": epss_freshness.get("freshness_class", "unknown"),
+        },
+    }
+
+
+def search_product_cves(
+    query: str,
+    db_path: str | Path | None = None,
+    limit: int = 20,
+    *,
+    vendor: str | None = None,
+    version: str | None = None,
+) -> list[dict[str, Any]]:
+    """Retrieve CPE product candidates with explicit name/version-context semantics.
+
+    Product matching remains lexical. Version assessment is limited to exact CPE
+    version strings and simple dotted-numeric range bounds. NVD's nested configuration
+    logic is not evaluated, so no row is promoted to a vulnerability verdict.
+    """
+    query_name, target_version, version_input_method = split_product_version(query, version)
+    terms = list(dict.fromkeys(product_tokens(query_name)))
     if not terms:
         return []
-    term_patterns = []
-    for term in terms:
-        alternatives = [term]
-        if "_" in term:
-            alternatives.append(term.replace("_", " "))
-        patterns = []
-        for alternative in alternatives:
-            # Treat a query term as a token, not an arbitrary substring.
-            if "_" in alternative:
-                left_boundary = r"(?<![a-z0-9_])"
-                right_boundary = r"(?![a-z0-9_])"
-            else:
-                left_boundary = r"(?<![a-z0-9])"
-                right_boundary = r"(?![a-z0-9])"
-            patterns.append(re.compile(left_boundary + re.escape(alternative) + right_boundary))
-        term_patterns.append((term, patterns))
+    requested_vendor = normalize_product_text(vendor)
     safe_limit = max(1, min(int(limit), 200))
+    freshness = get_source_freshness(db_path)
     candidates: dict[str, dict[str, Any]] = {}
 
     def like_pattern(term: str) -> str:
-        # Treat user input literally; LIKE wildcards in a query must not broaden matches.
         escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         return f"%{escaped}%"
 
@@ -462,8 +568,6 @@ def search_product_cves(query: str, db_path: str | Path | None = None, limit: in
         )
         sql_args.extend((pattern, pattern, pattern))
 
-    # Select only fields used by ranking; raw_json is intentionally excluded. Filtering
-    # inside SQLite avoids copying millions of irrelevant joined rows into Python memory.
     sql = """SELECT v.cve_id, v.description, v.published, v.modified,
                     v.cvss_score, v.cvss_severity, v.cisa_kev, v.kev_date_added,
                     v.epss_score, v.epss_percentile,
@@ -475,56 +579,168 @@ def search_product_cves(query: str, db_path: str | Path | None = None, limit: in
              JOIN vulnerabilities v ON v.cve_id=p.cve_id
              WHERE p.vulnerable=1 AND (""" + " OR ".join(term_clauses) + ")"
 
+    row_identity_key = ("matched_vendor", "matched_product", "matched_criteria", "version_start_including",
+                        "version_start_excluding", "version_end_including", "version_end_excluding")
+    match_class_rank = {
+        "exact_normalized_vendor_product": 3,
+        "all_query_terms_match": 2,
+        "partial_query_term_match": 1,
+    }
+    version_rank = {
+        "exact_cpe_version_match": 5,
+        "within_declared_numeric_version_bounds": 4,
+        "wildcard_cpe_version": 3,
+        "not_evaluated_no_target_version": 2,
+        "range_metadata_available_target_version_missing": 2,
+        "exact_cpe_version_present_target_version_missing": 2,
+        "range_comparison_indeterminate": 1,
+        "cpe_version_component_unavailable": 1,
+        "not_applicable_cpe_version_component": 1,
+        "exact_cpe_version_mismatch": 0,
+        "outside_declared_numeric_version_bounds": 0,
+    }
+
     with connect(db_path) as conn:
-        # Iterate the filtered cursor instead of fetchall(), limiting peak memory to
-        # relevant rows only. This still performs a lexical scan in SQLite, not full CPE
-        # configuration evaluation.
-        for row in conn.execute(sql, sql_args):
-            rowd = dict(row)
-            product_text = " ".join(
-                str(rowd.get(key) or "")
-                for key in ("matched_vendor", "matched_product", "matched_criteria")
-            ).lower()
-            matching = [
-                term for term, patterns in term_patterns
-                if any(pattern.search(product_text) for pattern in patterns)
-            ]
+        for raw_row in conn.execute(sql, sql_args):
+            row = dict(raw_row)
+            components = cpe23_components(row.get("matched_criteria"))
+            # Re-parse the original CPE criteria for matching so older rows imported by
+            # a less careful parser can still get correctly split escaped components.
+            matched_vendor = components.get("vendor") or row.get("matched_vendor")
+            matched_product = components.get("product") or row.get("matched_product")
+            if requested_vendor and normalize_product_text(matched_vendor) != requested_vendor:
+                continue
+            name_context = classify_name_match(query_name, matched_vendor, matched_product)
+            matching = name_context["matching_query_terms"]
             if not matching:
                 continue
-            score = round(100.0 * len(set(matching)) / len(set(terms)), 2)
-            if query.strip().lower() in product_text:
+            version_context = assess_version_context(target_version, row)
+            score = name_context["name_match_score"]
+            if name_context["name_match_class"] == "exact_normalized_vendor_product":
                 score = min(100.0, score + 10.0)
-            cve_id = rowd["cve_id"]
             candidate = {
-                "cve_id": cve_id,
-                "description": rowd["description"],
-                "published": rowd["published"],
-                "modified": rowd["modified"],
-                "cvss_score": rowd["cvss_score"],
-                "cvss_severity": rowd["cvss_severity"],
-                "cisa_kev": bool(rowd["cisa_kev"]),
-                "kev_date_added": rowd["kev_date_added"],
-                "epss_score": rowd["epss_score"],
-                "epss_percentile": rowd["epss_percentile"],
-                "matched_vendor": rowd["matched_vendor"],
-                "matched_product": rowd["matched_product"],
-                "matched_criteria": rowd["matched_criteria"],
-                "cpe_vulnerable": bool(rowd["cpe_vulnerable"]),
-                "version_start_including": rowd["version_start_including"],
-                "version_start_excluding": rowd["version_start_excluding"],
-                "version_end_including": rowd["version_end_including"],
-                "version_end_excluding": rowd["version_end_excluding"],
+                "cve_id": row["cve_id"],
+                "description": row["description"],
+                "published": row["published"],
+                "modified": row["modified"],
+                "cvss_score": row["cvss_score"],
+                "cvss_severity": row["cvss_severity"],
+                "cisa_kev": bool(row["cisa_kev"]),
+                "kev_date_added": row["kev_date_added"],
+                "epss_score": row["epss_score"],
+                "epss_percentile": row["epss_percentile"],
+                "matched_vendor": matched_vendor,
+                "matched_product": matched_product,
+                "matched_criteria": row["matched_criteria"],
+                "cpe_vulnerable": bool(row["cpe_vulnerable"]),
+                "version_start_including": row["version_start_including"],
+                "version_start_excluding": row["version_start_excluding"],
+                "version_end_including": row["version_end_including"],
+                "version_end_excluding": row["version_end_excluding"],
                 "product_relevance_score": score,
                 "matching_query_terms": matching,
+                "query_normalization": {
+                    "original_query": query,
+                    "normalized_product_query": name_context["normalized_query"],
+                    "query_terms": terms,
+                    "version_input_method": version_input_method,
+                    "target_vendor": vendor,
+                    "normalized_target_vendor": requested_vendor or None,
+                    "target_version": target_version,
+                },
+                "name_match_class": name_context["name_match_class"],
+                "version_context": version_context,
+                "version_match_status": version_context["status"],
+                "match_method": "normalized_vendor_product_token_overlap_against_local_NVD_CPE_rows",
+                "retrieval_source": "local_NVD_affected_products_table",
+                "configuration_evaluation": "not_performed_nested_NVD_AND_OR_logic_not_evaluated",
+                "local_source_signals": _source_signal_snapshot(row, freshness),
+                "candidate_relevance": (
+                    "name_match_but_target_version_does_not_match_this_CPE_row"
+                    if target_version and version_context["status"] in {
+                        "exact_cpe_version_mismatch", "outside_declared_numeric_version_bounds"
+                    } else
+                    "name_and_version_context_match_full_applicability_unevaluated"
+                    if target_version and version_context["status"] in {
+                        "exact_cpe_version_match", "within_declared_numeric_version_bounds"
+                    } else
+                    "name_match_version_comparison_indeterminate"
+                    if target_version and version_context["status"] == "range_comparison_indeterminate"
+                    else
+                    "name_match_version_not_supplied" if not target_version
+                    else "name_match_version_context_not_conclusive"
+                ),
                 "assessment": "product_context_candidate_not_file_attribution",
             }
+            product_row = {key: row.get(key) for key in row_identity_key}
+            product_row.update({
+                "vendor": matched_vendor,
+                "product": matched_product,
+                "name_match_class": name_context["name_match_class"],
+                "version_match_status": version_context["status"],
+                "version_context": version_context,
+            })
+            candidate["matching_product_rows"] = [product_row]
+            candidate["matched_cpe_row_count"] = 1
+            candidate["_rank"] = (
+                match_class_rank.get(name_context["name_match_class"], 0),
+                version_rank.get(version_context["status"], 1) if target_version else 0,
+                score,
+            )
+            cve_id = row["cve_id"]
             existing = candidates.get(cve_id)
-            if existing is None or candidate["product_relevance_score"] > existing["product_relevance_score"]:
+            if existing is None:
+                candidates[cve_id] = candidate
+                continue
+            row_signature = tuple(product_row.get(key) for key in row_identity_key)
+            existing_signatures = {
+                tuple(item.get(key) for key in row_identity_key)
+                for item in existing.get("matching_product_rows", [])
+            }
+            if row_signature not in existing_signatures:
+                existing["matched_cpe_row_count"] += 1
+                if len(existing["matching_product_rows"]) < 10:
+                    existing["matching_product_rows"].append(product_row)
+            if candidate["_rank"] > existing["_rank"]:
+                rows = existing["matching_product_rows"]
+                count = existing["matched_cpe_row_count"]
+                candidate["matching_product_rows"] = rows
+                candidate["matched_cpe_row_count"] = count
                 candidates[cve_id] = candidate
 
-    return sorted(candidates.values(), key=lambda item: (
-        -item["product_relevance_score"], -int(item["cisa_kev"]),
-        -(item["epss_score"] or 0.0), item["cve_id"]
+    results = list(candidates.values())
+    identities = sorted({
+        (normalize_product_text(row.get("vendor")), normalize_product_text(row.get("product")))
+        for candidate in results
+        for row in candidate.get("matching_product_rows", [])
+        if row.get("vendor") or row.get("product")
+    })
+    ambiguity = {
+        "status": "ambiguous_multiple_product_identities" if len(identities) > 1 else "single_or_unconfirmed_product_identity",
+        "distinct_matched_product_identity_count": len(identities),
+        "result_limit": safe_limit,
+        "assessment_scope": "identity ambiguity is computed across all matching CPE rows before the per-CVE result limit is applied",
+        "matched_product_identities": [
+            {"vendor": vendor or None, "product": product or None}
+            for vendor, product in identities[:20]
+        ],
+        "identities_truncated": len(identities) > 20,
+        "interpretation": (
+            "Multiple distinct vendor/product identities matched the lexical query; review vendor, product and version fields."
+            if len(identities) > 1 else
+            "A single or unconfirmed vendor/product identity was retrieved; lexical matching still does not prove product presence."
+        ),
+    }
+    for candidate in results:
+        candidate["query_ambiguity"] = ambiguity
+        candidate.pop("_rank", None)
+    return sorted(results, key=lambda item: (
+        -match_class_rank.get(item.get("name_match_class", ""), 0),
+        -version_rank.get(item.get("version_match_status", ""), 1) if target_version else 0,
+        -item["product_relevance_score"],
+        -int(item["cisa_kev"]),
+        -(item["epss_score"] or 0.0),
+        item["cve_id"],
     ))[:safe_limit]
 
 

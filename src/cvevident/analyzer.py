@@ -24,7 +24,8 @@ def _now() -> str:
 
 def analyze_file(path: str | Path, db_path: str | Path | None = None,
                  target_product: str | None = None, max_bytes: int = 100 * 1024 * 1024,
-                 candidate_limit: int = 10) -> dict[str, Any]:
+                 candidate_limit: int = 10, target_vendor: str | None = None,
+                 target_version: str | None = None) -> dict[str, Any]:
     input_path = Path(path).expanduser()
     suffix = input_path.suffix.lower()
     try:
@@ -131,7 +132,10 @@ def analyze_file(path: str | Path, db_path: str | Path | None = None,
                 "interpretation": sample["interpretation"],
             },
         })
-    report["target_context"] = build_product_context(target_product, str(db_path) if db_path else None, candidate_limit)
+    report["target_context"] = build_product_context(
+        target_product, str(db_path) if db_path else None, candidate_limit,
+        target_vendor=target_vendor, target_version=target_version,
+    )
     append_product_context_evidence(report)
     append_reported_source_evidence(report)
     finalize_evidence_traceability(report)

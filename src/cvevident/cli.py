@@ -12,9 +12,10 @@ from . import __version__
 from .analyzer import analyze_file
 from .db import SCHEMA_VERSION, connect, default_db_path, init_db
 from .reporting import serialize_json, to_html, to_markdown
+from .product_matching import normalize_product_text, split_product_version
 from .sources import sync_epss, sync_kev, sync_nvd_modified, sync_nvd_year, sync_nvd_years
 from .store import (
-    get_analysis, get_cve, get_stats, import_epss_csv, import_kev_json,
+    get_analysis, get_cve, get_stats, get_source_freshness, import_epss_csv, import_kev_json,
     import_nvd_json, import_reference_samples_json, search_cves, search_product_cves,
 )
 
@@ -93,6 +94,8 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument("file")
+    p.add_argument("--target-vendor", help="Optional exact vendor filter for product-context retrieval")
+    p.add_argument("--target-version", help="Optional installed/product version for conservative CPE version context")
     p.add_argument("--target-product", help="Product context for local affected-product CPE retrieval")
     p.add_argument("--output", help="Report path; use '-' or omit to print")
     p.add_argument("--format", choices=("json", "markdown", "html"), default="json")
@@ -103,6 +106,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("paths", nargs="+", help="Input files and/or directories")
     p.add_argument("--recursive", action="store_true", help="Recursively scan input directories")
     p.add_argument("--reports-dir", help="Optional directory for individual JSON reports")
+    p.add_argument("--target-vendor", help="Optional exact vendor filter for product-context retrieval")
+    p.add_argument("--target-version", help="Optional product version for conservative CPE version context")
     p.add_argument("--output", help="Summary JSON path; use '-' or omit to print")
     p.add_argument("--target-product", help="Product context for local affected-product CPE retrieval")
     p.add_argument("--max-bytes", type=int, default=100 * 1024 * 1024)
@@ -116,6 +121,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("search-product", help="Search CVEs using affected-product CPE fields only")
     p.add_argument("product")
+    p.add_argument("--vendor", help="Restrict results to a normalized vendor name")
+    p.add_argument("--version", help="Optional target version for conservative CPE version context")
     p.add_argument("--limit", type=int, default=20)
     return parser
 
@@ -283,6 +290,7 @@ def _analyze_batch(args: argparse.Namespace, db_path: str | Path) -> dict[str, A
             report = analyze_file(
                 file_path, db_path, args.target_product,
                 args.max_bytes, args.candidate_limit,
+                target_vendor=args.target_vendor, target_version=args.target_version,
             )
         except Exception as exc:
             results.append(_batch_error_result(file_path, "analysis", exc))
@@ -407,8 +415,27 @@ def main(argv: list[str] | None = None) -> int:
             _dump({"query": args.query, "results": search_cves(args.query, db_path, args.limit),
                    "note": "Lexical search results are not file/CVE attribution."})
         elif args.command == "search-product":
-            _dump({"product": args.product, "results": search_product_cves(args.product, db_path, args.limit),
-                   "note": "Product CPE retrieval is lexical; it does not evaluate full NVD configuration logic or prove an installed version is affected."})
+            resolved_product, resolved_version, version_input_method = split_product_version(args.product, args.version)
+            results = search_product_cves(
+                args.product, db_path, args.limit, vendor=args.vendor, version=args.version,
+            )
+            _dump({
+                "product": args.product,
+                "normalized_product": normalize_product_text(resolved_product),
+                "vendor_filter": args.vendor,
+                "requested_version": args.version,
+                "resolved_version": resolved_version,
+                "version_input_method": version_input_method,
+                "results": results,
+                "query_ambiguity": results[0].get("query_ambiguity") if results else {
+                    "status": "no_product_identity_returned",
+                    "distinct_matched_product_identity_count": 0,
+                    "matched_product_identities": [],
+                },
+                "source_freshness": get_source_freshness(db_path),
+                "retrieval_method": "normalized_vendor_product_token_overlap_against_local_NVD_CPE_rows",
+                "note": "Version context is conservative and only compares exact CPE versions or simple dotted-numeric bounds. Full NVD AND/OR applicability is not evaluated; KEV/EPSS are separate vulnerability-level signals, not file evidence.",
+            })
         elif args.command == "show-cve":
             result = get_cve(args.cve_id, db_path)
             if result is None:
@@ -417,7 +444,10 @@ def main(argv: list[str] | None = None) -> int:
             result.pop("raw_json", None)
             _dump(result)
         elif args.command == "analyze":
-            report = analyze_file(args.file, db_path, args.target_product, args.max_bytes, args.candidate_limit)
+            report = analyze_file(
+                args.file, db_path, args.target_product, args.max_bytes, args.candidate_limit,
+                target_vendor=args.target_vendor, target_version=args.target_version,
+            )
             _write_output(_render(report, args.format), args.output)
         elif args.command == "analyze-batch":
             summary = _analyze_batch(args, db_path)

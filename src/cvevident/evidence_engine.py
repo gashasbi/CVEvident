@@ -7,26 +7,77 @@ from __future__ import annotations
 
 from typing import Any
 
-from .store import search_product_cves
+from .store import get_source_freshness, search_product_cves
+from .product_matching import normalize_product_text, split_product_version
 
 
-def build_product_context(target_product: str | None, db_path: str | None,
-                          limit: int = 10) -> dict[str, Any]:
+def build_product_context(
+    target_product: str | None,
+    db_path: str | None,
+    limit: int = 10,
+    target_vendor: str | None = None,
+    target_version: str | None = None,
+) -> dict[str, Any]:
+    """Retrieve transparent product candidates and the local source freshness snapshot."""
+    freshness = get_source_freshness(db_path)
     if not target_product or not target_product.strip():
         return {
             "target_product": None,
+            "target_vendor": target_vendor.strip() if target_vendor else None,
+            "target_version": target_version.strip() if target_version else None,
             "candidate_cves": [],
             "retrieval_method": "not_requested",
+            "source_freshness": freshness,
+            "product_identity_ambiguity": {
+                "status": "not_assessed_no_product_query",
+                "distinct_matched_product_identity_count": 0,
+                "matched_product_identities": [],
+            },
+            "configuration_evaluation": "not_performed",
             "interpretation": "No target product was supplied; no product-context CVE search was performed.",
         }
-    candidates = search_product_cves(target_product, db_path=db_path, limit=limit)
+
+    query_name, resolved_version, version_input_method = split_product_version(target_product, target_version)
+    candidates = search_product_cves(
+        target_product, db_path=db_path, limit=limit, vendor=target_vendor, version=target_version,
+    )
+    if candidates and isinstance(candidates[0].get("query_ambiguity"), dict):
+        identity_summary = dict(candidates[0]["query_ambiguity"])
+    else:
+        identity_summary = {
+            "status": "no_product_identity_returned",
+            "distinct_matched_product_identity_count": 0,
+            "result_limit": max(1, min(int(limit), 200)),
+            "assessment_scope": "no candidate identity was returned",
+            "matched_product_identities": [],
+        }
+    identity_summary.setdefault("interpretation", (
+        "This is a lexical identity estimate, not proof the product is present in the file."
+    ))
     return {
-        "target_product": target_product.strip(),
+        "target_product": query_name,
+        "target_product_input": target_product,
+        "target_vendor": target_vendor.strip() if target_vendor else None,
+        "normalized_target_product": normalize_product_text(query_name),
+        "normalized_target_vendor": normalize_product_text(target_vendor) or None,
+        "target_version": resolved_version,
+        "version_input_method": version_input_method,
         "candidate_cves": candidates,
-        "retrieval_method": "lexical_match_against_NVD_affected_product_criteria",
+        "retrieval_method": "normalized_vendor_product_token_overlap_against_local_NVD_CPE_rows",
+        "matching_policy": {
+            "name_normalization": "Unicode NFKC, casefold, punctuation/underscore/hyphen token normalization",
+            "name_match_classes": ["exact_normalized_vendor_product", "all_query_terms_match", "partial_query_term_match"],
+            "version_assessment": "exact CPE version or simple dotted-numeric bounds only; unsupported syntax is indeterminate",
+            "full_nvd_configuration_evaluation": False,
+        },
+        "product_identity_ambiguity": identity_summary,
+        "source_freshness": freshness,
+        "configuration_evaluation": "not_performed_nested_NVD_AND_OR_logic_and_platform_conditions_not_evaluated",
         "interpretation": (
-            "These are product-context candidates only. The lexical score is not a probability, "
-            "does not evaluate all NVD configuration logic or version ranges, and does not attribute the file to a CVE."
+            "These candidates were retrieved by normalized lexical overlap against locally imported NVD affected-product rows. "
+            "Optional version context is evaluated only for exact CPE versions and simple dotted-numeric bounds. The full NVD "
+            "configuration tree, including nested AND/OR conditions and platform context, is not evaluated. Product presence in "
+            "the analyzed file is not established; KEV and EPSS are separate vulnerability-level signals, not file evidence."
         ),
     }
 
@@ -106,6 +157,7 @@ def build_cve_associations(reference_sample_matches: list[dict[str, Any]],
         item["association_bases"].append({
             "type": "product_context",
             "target_product": target_context.get("target_product"),
+            "target_product_input": target_context.get("target_product_input"),
             "matched_vendor": candidate.get("matched_vendor"),
             "matched_product": candidate.get("matched_product"),
             "matched_criteria": candidate.get("matched_criteria"),
@@ -116,6 +168,20 @@ def build_cve_associations(reference_sample_matches: list[dict[str, Any]],
             "version_start_excluding": candidate.get("version_start_excluding"),
             "version_end_including": candidate.get("version_end_including"),
             "version_end_excluding": candidate.get("version_end_excluding"),
+            "target_vendor": target_context.get("target_vendor"),
+            "target_version": target_context.get("target_version"),
+            "name_match_class": candidate.get("name_match_class"),
+            "version_match_status": candidate.get("version_match_status"),
+            "version_context": candidate.get("version_context"),
+            "candidate_relevance": candidate.get("candidate_relevance"),
+            "query_normalization": candidate.get("query_normalization"),
+            "query_ambiguity": candidate.get("query_ambiguity"),
+            "matching_product_rows": candidate.get("matching_product_rows", []),
+            "matched_cpe_row_count": candidate.get("matched_cpe_row_count", 1),
+            "match_method": candidate.get("match_method"),
+            "retrieval_source": candidate.get("retrieval_source"),
+            "local_source_signals": candidate.get("local_source_signals"),
+            "configuration_evaluation": candidate.get("configuration_evaluation"),
             "score_semantics": "lexical_product_retrieval_score_not_probability",
             "retrieval_method": target_context.get("retrieval_method"),
             "evidence_reference": {

@@ -292,8 +292,38 @@ def to_markdown(report: dict[str, Any]) -> str:
     context = report.get("target_context", {})
     lines += ["", "## Product-context CVE candidates", ""]
     lines.append(f"Target product: `{context.get('target_product') or 'not supplied'}`")
+    if context.get("target_vendor"):
+        lines.append(f"Target vendor filter: `{_report_single_line(context.get('target_vendor'))}`")
+    if context.get("target_version"):
+        lines.append(f"Target version context: `{_report_single_line(context.get('target_version'))}`")
+    if context.get("normalized_target_product"):
+        lines.append(f"Normalized product query: `{_report_single_line(context.get('normalized_target_product'))}`")
     lines.append("")
     lines.append(context.get("interpretation", "No product-context search was performed."))
+    ambiguity = context.get("product_identity_ambiguity") or {}
+    if ambiguity:
+        lines.append("")
+        lines.append(
+            f"Product identity ambiguity: `{_report_single_line(ambiguity.get('status', 'unknown'))}`; "
+            f"distinct matched identities: `{ambiguity.get('distinct_matched_product_identity_count', 0)}`."
+        )
+        if ambiguity.get("matched_product_identities"):
+            labels = [
+                f"{identity.get('vendor') or 'unknown-vendor'}:{identity.get('product') or 'unknown-product'}"
+                for identity in ambiguity["matched_product_identities"][:20]
+            ]
+            lines.append("Matched identities: " + ", ".join(f"`{_report_single_line(label)}`" for label in labels))
+    freshness = context.get("source_freshness", {}).get("sources", {})
+    if freshness:
+        lines += ["", "### Local vulnerability-data freshness", "", "Freshness measures time since successful local import, not upstream completeness.", ""]
+        lines += ["| Source | Local state | Freshness | Last successful import (UTC) |", "|---|---|---|---|"]
+        for source_name in ("NVD", "CISA KEV", "FIRST EPSS"):
+            status = freshness.get(source_name, {})
+            lines.append(
+                f"| `{source_name}` | `{_report_single_line(status.get('state', 'unknown'))}` "
+                f"| `{_report_single_line(status.get('freshness_class', 'unknown'))}` "
+                f"| `{_report_single_line(status.get('last_success_at') or 'unknown')}` |"
+            )
     candidates = context.get("candidate_cves", [])
     if not candidates:
         lines.append("")
@@ -327,10 +357,27 @@ def to_markdown(report: dict[str, Any]) -> str:
                 )
             kev_value = candidate.get("cisa_kev")
             kev_status = "yes" if kev_value is True else "no" if kev_value is False else "unknown"
-            lines.append(
-                f"  - CISA KEV: {kev_status}; "
-                f"EPSS: {_report_single_line(candidate.get('epss_score') if candidate.get('epss_score') is not None else 'not available')}"
+            product_basis = next(
+                (basis for basis in candidate.get("association_bases", []) if basis.get("type") == "product_context"),
+                {},
             )
+            source_signals = product_basis.get("local_source_signals") or {}
+            kev_signal = source_signals.get("CISA KEV", {})
+            epss_signal = source_signals.get("FIRST EPSS", {})
+            if kev_signal.get("state"):
+                kev_status = str(kev_signal["state"])
+            epss_text = (
+                str(candidate.get("epss_score"))
+                if candidate.get("epss_score") is not None else str(epss_signal.get("state", "unknown"))
+            )
+            lines.append(f"  - CISA KEV: {kev_status}; EPSS score: {_report_single_line(epss_text)}")
+            if candidate.get("published") or candidate.get("modified"):
+                lines.append(
+                    f"  - NVD published/modified: `{_report_single_line(candidate.get('published') or 'unknown')}` / "
+                    f"`{_report_single_line(candidate.get('modified') or 'unknown')}`"
+                )
+            if epss_signal.get("percentile") is not None:
+                lines.append(f"  - EPSS percentile: `{_report_single_line(epss_signal.get('percentile'))}`")
             for basis in candidate.get("association_bases", []):
                 basis_type = basis.get("type")
                 if basis_type == "exact_sha256_sample_match":
@@ -365,6 +412,30 @@ def to_markdown(report: dict[str, Any]) -> str:
                     )
                     if basis.get("matched_criteria"):
                         lines.append(f"    - Matched CPE: `{_report_single_line(basis['matched_criteria'])}`")
+                    if basis.get("name_match_class"):
+                        lines.append(f"    - Name-match class: `{_report_single_line(basis.get('name_match_class'))}`")
+                    if basis.get("candidate_relevance"):
+                        lines.append(f"    - Candidate relevance: `{_report_single_line(basis.get('candidate_relevance'))}`")
+                    version_context = basis.get("version_context") or {}
+                    if version_context:
+                        lines.append(
+                            f"    - Version context: `{_report_single_line(version_context.get('status', 'unknown'))}` "
+                            f"via `{_report_single_line(version_context.get('comparison_method', 'unknown'))}`"
+                        )
+                        lines.append(f"      - {_report_single_line(version_context.get('interpretation', 'No version interpretation available.'))}")
+                    if basis.get("query_normalization"):
+                        normalized_query = basis["query_normalization"].get("normalized_product_query")
+                        query_terms = basis["query_normalization"].get("query_terms") or []
+                        lines.append(
+                            f"    - Normalized query: `{_report_single_line(normalized_query or 'unknown')}`; "
+                            f"matched terms: `{_report_single_line(', '.join(str(term) for term in basis.get('matching_query_terms', []) or []))}`"
+                        )
+                    source_signals = basis.get("local_source_signals") or {}
+                    for source_name in ("NVD", "CISA KEV", "FIRST EPSS"):
+                        signal = source_signals.get(source_name) or {}
+                        if signal:
+                            state = signal.get("state", signal.get("freshness_class", "unknown"))
+                            lines.append(f"    - {source_name} local signal: `{_report_single_line(state)}`")
                 if basis.get("interpretation"):
                     lines.append(f"    - Interpretation: {_report_single_line(basis['interpretation'])}")
     lines += ["", "Association ordering is for review only; it is not a calibrated probability or proof of exploitability."]
