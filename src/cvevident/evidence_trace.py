@@ -429,7 +429,22 @@ def finalize_evidence_traceability(report: dict[str, Any]) -> None:
         if value and value not in limitation_reasons:
             limitation_reasons.append(str(value))
 
-    coverage_complete = parser_status not in incomplete_statuses and not truncated
+    file_info = report.get("file") if isinstance(report.get("file"), dict) else {}
+    file_type = str(file_info.get("file_type") or "").strip().lower()
+    format_recognized = bool(file_type) and not file_type.startswith("unknown")
+    if not format_recognized:
+        unknown_format_reason = (
+            "Input format was not recognized as a supported format; fallback byte-oriented observations "
+            "are not a format-specific parse."
+        )
+        if unknown_format_reason not in limitation_reasons:
+            limitation_reasons.append(unknown_format_reason)
+
+    coverage_complete = (
+        format_recognized
+        and parser_status not in incomplete_statuses
+        and not truncated
+    )
     report["analysis_coverage"] = {
         "schema_version": 1,
         "parser_section": section_name,

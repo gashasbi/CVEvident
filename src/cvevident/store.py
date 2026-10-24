@@ -900,6 +900,16 @@ def get_analysis(analysis_id: int, db_path: str | Path | None = None) -> dict[st
             except (TypeError, json.JSONDecodeError):
                 item["value"] = raw_value
             item["details"] = json.loads(item.pop("details_json"))
+            # Rehydrate report-level provenance after loading normalized evidence rows.
+            # Traceability is already present in details_json, so the schema stays unchanged.
+            traceability = item["details"].get("traceability")
+            if isinstance(traceability, dict):
+                item["evidence_id"] = traceability.get("evidence_id")
+                item["evidence_class"] = traceability.get("evidence_class")
+                item["evidence_origin"] = traceability.get("evidence_origin")
+                source_locator = traceability.get("source_locator")
+                if isinstance(source_locator, dict):
+                    item["source_locator"] = source_locator
             report["evidence"].append(item)
         report["stored_candidates"] = [dict(item) for item in conn.execute(
             "SELECT c.cve_id,c.rank,c.score,c.assessment,c.rationale_json,v.description,v.cvss_score,v.cvss_severity,v.cisa_kev,v.epss_score "
