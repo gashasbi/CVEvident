@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import inspect
 import io
+import logging
+import threading
 from collections import Counter
 from functools import wraps
 from typing import Any
@@ -132,6 +134,88 @@ def _with_pdf_resource_limits(function):
 
     return wrapped
 
+
+_MAX_CAPTURED_PYPDF_DIAGNOSTICS = 12
+
+
+class _PypdfDiagnosticCapture(logging.Handler):
+    """Capture bounded warning-level pypdf diagnostics for the current thread."""
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.WARNING)
+        self.owner_thread = threading.get_ident()
+        self.count = 0
+        self.messages: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        # A handler temporarily attached to the pypdf logger may also see records
+        # from concurrent analyses. Keep only the current analysis thread's logs.
+        if record.thread != self.owner_thread:
+            return
+        self.count += 1
+        if len(self.messages) >= _MAX_CAPTURED_PYPDF_DIAGNOSTICS:
+            return
+        try:
+            message = " ".join(record.getMessage().split())
+        except Exception:
+            message = "pypdf emitted an unreadable diagnostic message"
+        message = "".join(
+            character for character in message
+            if character == "\t" or ord(character) >= 32
+        )[:300]
+        if message and message not in self.messages:
+            self.messages.append(message)
+
+
+def _capture_pypdf_diagnostics(function):
+    """Record pypdf recovery warnings and downgrade otherwise-clean parses."""
+    @wraps(function)
+    def wrapped(data: bytes, is_pdf: bool) -> dict[str, Any]:
+        if not is_pdf:
+            return function(data, is_pdf)
+
+        logger = logging.getLogger("pypdf")
+        capture = _PypdfDiagnosticCapture()
+        logger.addHandler(capture)
+        try:
+            result = function(data, is_pdf)
+        finally:
+            logger.removeHandler(capture)
+
+        result["parser_diagnostics_count"] = capture.count
+        result["parser_diagnostics"] = list(capture.messages)
+        if result.get("page_count_declared") == 0:
+            warnings = result.setdefault("warnings", [])
+            zero_page_warning = (
+                "The PDF page tree declares zero pages; this can be structurally valid, "
+                "but no page-level content is available for inspection."
+            )
+            if zero_page_warning not in warnings:
+                warnings.append(zero_page_warning)
+        if capture.count:
+            if result.get("status") == "parsed":
+                result["status"] = "partial"
+
+            warnings = result.setdefault("warnings", [])
+            summary = (
+                f"pypdf emitted {capture.count} warning-or-higher diagnostic(s) "
+                "during structural parsing; recovery or non-standard structure "
+                "may affect completeness."
+            )
+            if summary not in warnings:
+                warnings.append(summary)
+            for message in capture.messages[:5]:
+                note = f"pypdf diagnostic: {message}"
+                if note not in warnings:
+                    warnings.append(note)
+            if len(capture.messages) > 5:
+                warnings.append(
+                    "Additional distinct pypdf diagnostics were retained in "
+                    "parser_diagnostics but omitted from the warning list."
+                )
+        return result
+    return wrapped
+
 _ANNOTATION_SUBTYPES = {
     "/Text", "/Link", "/FreeText", "/Line", "/Square", "/Circle", "/Polygon",
     "/PolyLine", "/Highlight", "/Underline", "/Squiggly", "/StrikeOut", "/Caret",
@@ -170,6 +254,8 @@ def _base_result(status: str, parser_version: str | None = None) -> dict[str, An
         "truncated": False,
         "resolution_errors": 0,
         "resolution_error_types": [],
+        "parser_diagnostics_count": 0,
+        "parser_diagnostics": [],
         "findings": [],
         "findings_truncated": False,
         "location_semantics": (
@@ -228,6 +314,7 @@ def _join_object_path(parent: str, segment: str, inherited_truncation: bool) -> 
     return path[: _MAX_PATH_LENGTH - 3] + "...", True
 
 
+@_capture_pypdf_diagnostics
 @_with_pdf_resource_limits
 def analyze_pdf_structure(data: bytes, is_pdf: bool) -> dict[str, Any]:
     """Inspect PDF object dictionaries without executing actions or extracting stream bytes.
