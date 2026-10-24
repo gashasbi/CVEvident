@@ -143,6 +143,23 @@ def test_coverage_marks_incomplete_parser_scope_and_explains_absence() -> None:
     assert "does not establish that the file is safe" in coverage["absence_of_findings_means"]
     assert any("Not inspected by the declared scope" in item for item in report["warnings"])
 
+def test_encrypted_pdf_does_not_claim_complete_static_coverage() -> None:
+    report = _traceable_report()
+    report["structural_analysis"] = {
+        "status": "encrypted",
+        "truncated": False,
+        "warnings": ["The PDF is encrypted. Object-graph inspection was skipped without a password."],
+        "findings": [],
+    }
+
+    finalize_evidence_traceability(report)
+
+    coverage = report["analysis_coverage"]
+    assert coverage["parser_status"] == "encrypted"
+    assert coverage["complete_for_declared_static_scope"] is False
+    assert any("encrypted" in reason.lower() for reason in coverage["limitation_reasons"])
+
+
 def test_evidence_summary_reports_classes_and_locator_kinds() -> None:
     report = _traceable_report()
     append_product_context_evidence(report)

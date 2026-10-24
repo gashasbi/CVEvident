@@ -349,6 +349,21 @@ class OfficeXmlResourceLimitTests(unittest.TestCase):
         self.assertTrue(any("duplicate member name" in w for w in report["warnings"]))
 
 
+    def test_case_insensitive_duplicate_zip_member_names_are_skipped_and_reported(self):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            path = _office_package(
+                self.root / "case-collision.docx",
+                extra_members=(("WORD/DOCUMENT.XML", b"<alternate/>"),),
+            )
+        report = analyze_office(str(path))
+        analysis = report["office_analysis"]
+        self.assertEqual(analysis["status"], "partial")
+        self.assertTrue(any("case-insensitive member-name collision" in w for w in report["warnings"]))
+        self.assertNotIn("word/document.xml", analysis["parts_inventory"])
+        self.assertNotIn("WORD/DOCUMENT.XML", analysis["parts_inventory"])
+
+
 class OdfResourceLimitTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

@@ -419,7 +419,7 @@ def finalize_evidence_traceability(report: dict[str, Any]) -> None:
         or parser_report.get("findings_truncated")
         or parser_report.get("inventory_truncated")
     )
-    incomplete_statuses = {"partial", "failed", "unavailable", "unsupported", "unknown"}
+    incomplete_statuses = {"partial", "failed", "unavailable", "unsupported", "unknown", "encrypted"}
     scope = report.get("scope") or {}
     limitation_reasons: list[str] = []
     for value in list(scope.get("not_implemented", []) or []):

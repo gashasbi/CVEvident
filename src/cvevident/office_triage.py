@@ -232,9 +232,38 @@ def analyze_office(
             partial = True
 
         exact_name_counts = Counter(info.filename for info in all_infos)
-        duplicate_names = {name for name, count in exact_name_counts.items() if count > 1}
+        # OPC part names are compared case-insensitively using ASCII name equivalence.
+        # Treat all colliding members as ambiguous instead of selecting one silently.
+        ascii_case_translation = str.maketrans(
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"
+        )
+        names_by_opc_key: dict[str, set[str]] = {}
+        for info in all_infos:
+            if info.is_dir():
+                continue
+            opc_key = info.filename.translate(ascii_case_translation)
+            names_by_opc_key.setdefault(opc_key, set()).add(info.filename)
+        case_insensitive_collision_groups = {
+            key: names for key, names in names_by_opc_key.items() if len(names) > 1
+        }
+        case_insensitive_collision_names = {
+            name
+            for names in case_insensitive_collision_groups.values()
+            for name in names
+        }
+        duplicate_names = (
+            {name for name, count in exact_name_counts.items() if count > 1}
+            | case_insensitive_collision_names
+        )
         if duplicate_names:
             warnings.append(f"Package contains {len(duplicate_names)} duplicate member name(s); ambiguous names were not parsed.")
+            partial = True
+        if case_insensitive_collision_groups:
+            warnings.append(
+                "Package contains "
+                f"{len(case_insensitive_collision_groups)} case-insensitive member-name collision group(s); "
+                "all colliding names were treated as ambiguous and skipped."
+            )
             partial = True
 
         unsafe_names = {info.filename for info in all_infos if _is_unsafe_member_name(info.filename)}
