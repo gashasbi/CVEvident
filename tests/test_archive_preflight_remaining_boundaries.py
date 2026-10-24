@@ -104,13 +104,12 @@ class TestCentralDirectoryCorruptionBoundaries:
 
         # Insert one unexpected byte between the central directory and EOCD,
         # then update the declared size so the directory bounds include it.
-        data[pos:pos] = b"\\x00"
+        data[pos:pos] = bytes([0])
         pos = locate_eocd(data)
         struct.pack_into("<I", data, pos + 12, original_size + 1)
 
         with pytest.raises(ValueError, match="malformed member record"):
             _scan_central_directory(bytes(data), max_entries=10)
-
 
 class TestZip64CentralDirectoryBoundaries:
     def test_reads_uncompressed_size_from_zip64_extra_field(self):
