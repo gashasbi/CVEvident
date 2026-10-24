@@ -150,5 +150,70 @@ class LegacyOfficeTests(unittest.TestCase):
         self.assertTrue(any("invalid or unavailable FAT entry" in warning for warning in analysis["warnings"]))
         self.assertTrue(any("Directory chain:" in warning for warning in report["warnings"]))
 
+
+    def test_invalid_cfb_header_fields_fail_closed(self):
+        mutations = [
+            ("byte order", 28, "<H", 0x0000),
+            ("major version", 26, "<H", 5),
+            ("sector shift", 30, "<H", 10),
+            ("mini-sector shift", 32, "<H", 5),
+        ]
+        for label, offset, fmt, value in mutations:
+            with self.subTest(field=label):
+                data = bytearray(build_cfb([("Root Entry", 5), ("WordDocument", 2)]))
+                struct.pack_into(fmt, data, offset, value)
+                report = self.analyze("invalid-header.doc", bytes(data))
+                self.assertEqual(report["legacy_office_analysis"]["status"], "failed")
+
+    def test_non_sector_aligned_cfb_is_reported_partial(self):
+        data = build_cfb([("Root Entry", 5), ("WordDocument", 2)]) + b"\x00"
+        report = self.analyze("misaligned.doc", data)
+        analysis = report["legacy_office_analysis"]
+        self.assertEqual(analysis["status"], "partial")
+        self.assertTrue(any("not aligned" in warning for warning in analysis["warnings"]))
+
+    def test_fat_reference_outside_file_is_reported_without_trusting_directory(self):
+        data = bytearray(build_cfb([("Root Entry", 5), ("WordDocument", 2)]))
+        struct.pack_into("<I", data, 76, 99)
+        report = self.analyze("bad-fat-reference.doc", bytes(data))
+        analysis = report["legacy_office_analysis"]
+        self.assertEqual(analysis["status"], "failed")
+        self.assertTrue(any("FAT references a sector outside the file" in warning for warning in analysis["warnings"]))
+        self.assertTrue(any("directory stream is unavailable or empty" in warning.lower() for warning in analysis["warnings"]))
+
+    def test_fat_sector_not_marked_as_fat_makes_analysis_partial(self):
+        data = bytearray(build_cfb([("Root Entry", 5), ("WordDocument", 2)]))
+        # The first FAT word describes directory sector 0; the second marks FAT sector 1.
+        struct.pack_into("<I", data, 1028, EOC)
+        report = self.analyze("bad-fat-marker.doc", bytes(data))
+        analysis = report["legacy_office_analysis"]
+        self.assertEqual(analysis["status"], "partial")
+        self.assertTrue(any("is not marked as a FAT sector" in warning for warning in analysis["warnings"]))
+
+    def test_fat_sector_count_cap_fails_before_chain_traversal(self):
+        from unittest.mock import patch
+        data = build_cfb([("Root Entry", 5), ("WordDocument", 2)])
+        with patch("cvevident.legacy_office_triage._MAX_FAT_SECTORS", 0):
+            report = self.analyze("fat-cap.doc", data)
+        self.assertEqual(report["legacy_office_analysis"]["status"], "failed")
+        self.assertTrue(any("FAT or DIFAT count exceeds" in warning for warning in report["warnings"]))
+
+    def test_encrypted_ooxml_wrapper_is_unsupported_not_decrypted(self):
+        data = build_cfb([("Root Entry", 5), ("EncryptedPackage", 2), ("EncryptionInfo", 2)])
+        report = self.analyze("encrypted.doc", data)
+        analysis = report["legacy_office_analysis"]
+        self.assertEqual(analysis["status"], "unsupported")
+        self.assertEqual(analysis["format_id"], "encrypted_office_container")
+        self.assertTrue(analysis["encrypted_content_present"])
+        self.assertTrue(any("not decrypted" in warning for warning in analysis["warnings"]))
+
+    def test_unknown_ole_directory_is_unsupported_without_inventing_family(self):
+        data = build_cfb([("Root Entry", 5), ("UnrecognizedStream", 2)])
+        report = self.analyze("unknown-ole.bin", data)
+        analysis = report["legacy_office_analysis"]
+        self.assertEqual(analysis["status"], "unsupported")
+        self.assertIsNone(analysis["family"])
+        self.assertEqual(analysis["format_id"], "unknown_ole_cfb")
+
 if __name__ == "__main__":
     unittest.main()
