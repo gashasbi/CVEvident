@@ -175,4 +175,4 @@ The global `--db` option must appear before the command, for example `cvevident 
 
 ## License
 
-See the repository's `LICENSE` file for the terms that apply to the project.
+[MIT](LICENSE)
