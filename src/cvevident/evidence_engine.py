@@ -62,11 +62,21 @@ def build_product_context(
         "normalized_target_vendor": normalize_product_text(target_vendor) or None,
         "target_version": resolved_version,
         "version_input_method": version_input_method,
+        "version_input_conflict": version_input_method == "explicit_option_conflicts_with_query_suffix",
+        "version_input_warning": (
+            "The product query ended with a version that conflicts with the explicit target version; "
+            "the explicit target-version option was used for version context."
+            if version_input_method == "explicit_option_conflicts_with_query_suffix" else None
+        ),
         "candidate_cves": candidates,
         "retrieval_method": "normalized_vendor_product_token_overlap_against_local_NVD_CPE_rows",
         "matching_policy": {
             "name_normalization": "Unicode NFKC, casefold, punctuation/underscore/hyphen token normalization",
-            "name_match_classes": ["exact_normalized_vendor_product", "all_query_terms_match", "partial_query_term_match"],
+            "name_match_classes": [
+                "exact_normalized_vendor_product", "all_query_terms_match",
+                "partial_query_term_match", "vendor_only_match",
+            ],
+            "name_match_score": "product-name query terms carry full weight; vendor-only terms carry half weight",
             "version_assessment": "exact CPE version or simple dotted-numeric bounds only; unsupported syntax is indeterminate",
             "full_nvd_configuration_evaluation": False,
         },
@@ -74,6 +84,11 @@ def build_product_context(
         "source_freshness": freshness,
         "configuration_evaluation": "not_performed_nested_NVD_AND_OR_logic_and_platform_conditions_not_evaluated",
         "interpretation": (
+            (
+                "The supplied product query ended in a version that conflicts with the explicit target version; "
+                "the explicit target-version option was used. "
+            ) if version_input_method == "explicit_option_conflicts_with_query_suffix" else ""
+        ) + (
             "These candidates were retrieved by normalized lexical overlap against locally imported NVD affected-product rows. "
             "Optional version context is evaluated only for exact CPE versions and simple dotted-numeric bounds. The full NVD "
             "configuration tree, including nested AND/OR conditions and platform context, is not evaluated. Product presence in "

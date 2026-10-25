@@ -49,10 +49,19 @@ def split_product_version(query: str, version: str | None = None) -> tuple[str, 
     if version is not None and str(version).strip():
         explicit_version = str(version).strip()
         trailing_match = _TRAILING_VERSION_RE.search(original)
-        if trailing_match and trailing_match.group(1).casefold() == explicit_version.casefold():
+        if trailing_match:
             stripped_name = original[: trailing_match.start()].strip()
+            query_version = trailing_match.group(1).strip()
             if stripped_name:
                 original = stripped_name
+                same_version = query_version.casefold() == explicit_version.casefold()
+                if not same_version:
+                    comparison = _compare_numeric_versions(query_version, explicit_version)
+                    same_version = comparison == 0
+                if not same_version:
+                    # Use the explicit option as the operative version, but don't hide
+                    # a contradictory suffix that could otherwise pollute product tokens.
+                    return original, explicit_version, "explicit_option_conflicts_with_query_suffix"
         return original, explicit_version, "explicit_option"
     match = _TRAILING_VERSION_RE.search(original)
     if match:
@@ -163,7 +172,6 @@ def assess_version_context(target_version: str | None, row: dict[str, Any]) -> d
         return base
 
     if has_bounds and criteria_version in {None, "", "*"}:
-        comparisons: list[tuple[str, str, int]] = []
         checks = (
             ("version_start_including", "ge"),
             ("version_start_excluding", "gt"),
@@ -268,21 +276,43 @@ def classify_name_match(query: str, vendor: str | None, product: str | None) -> 
     vendor_normalized = normalize_product_text(vendor)
     product_normalized = normalize_product_text(product)
     query_terms = product_tokens(query)
+    vendor_terms = set(product_tokens(vendor))
+    product_terms = set(product_tokens(product))
     identity = normalize_product_text(f"{vendor or ''} {product or ''}")
     identity_terms = set(identity.split())
     matched_terms = [term for term in query_terms if term in identity_terms]
+    matched_vendor_terms = [term for term in query_terms if term in vendor_terms]
+    matched_product_terms = [term for term in query_terms if term in product_terms]
     if query_normalized and query_normalized == identity:
         match_class = "exact_normalized_vendor_product"
+    elif not matched_product_terms and matched_vendor_terms:
+        # A vendor-only overlap is useful context, but much weaker than matching a
+        # product name. Keep it as a candidate while ranking it below product hits.
+        match_class = "vendor_only_match"
     elif query_terms and len(matched_terms) == len(query_terms):
         match_class = "all_query_terms_match"
     else:
         match_class = "partial_query_term_match"
+
+    if match_class == "exact_normalized_vendor_product":
+        score = 100.0
+    elif query_terms:
+        # Product tokens carry full weight; vendor-only tokens contribute half weight.
+        product_matches = set(matched_product_terms)
+        vendor_only_matches = set(matched_vendor_terms) - product_matches
+        score = round(
+            100.0 * (len(product_matches) + 0.5 * len(vendor_only_matches)) / len(set(query_terms)), 2
+        )
+    else:
+        score = 0.0
     return {
         "normalized_query": query_normalized,
         "normalized_vendor": vendor_normalized,
         "normalized_product": product_normalized,
         "query_terms": query_terms,
         "matching_query_terms": matched_terms,
+        "matching_vendor_terms": matched_vendor_terms,
+        "matching_product_terms": matched_product_terms,
         "name_match_class": match_class,
-        "name_match_score": round(100.0 * len(matched_terms) / len(query_terms), 2) if query_terms else 0.0,
+        "name_match_score": score,
     }

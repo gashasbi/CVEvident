@@ -426,6 +426,12 @@ def main(argv: list[str] | None = None) -> int:
                 "requested_version": args.version,
                 "resolved_version": resolved_version,
                 "version_input_method": version_input_method,
+                "version_input_conflict": version_input_method == "explicit_option_conflicts_with_query_suffix",
+                "version_input_warning": (
+                    "The product query ended with a version that conflicts with the explicit target version; "
+                    "the explicit target-version option was used."
+                    if version_input_method == "explicit_option_conflicts_with_query_suffix" else None
+                ),
                 "results": results,
                 "query_ambiguity": results[0].get("query_ambiguity") if results else {
                     "status": "no_product_identity_returned",

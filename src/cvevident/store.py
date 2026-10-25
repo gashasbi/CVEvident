@@ -172,16 +172,35 @@ def _upsert_vulnerability(conn: sqlite3.Connection, *, cve_id: str,
     _record_source_observation(conn, cve_id, source, modified, observation_payload)
 
 
-def _update_source_sync(conn: sqlite3.Connection, source: str, count: int, details: str) -> None:
+def _update_source_sync(
+    conn: sqlite3.Connection,
+    source: str,
+    count: int,
+    details: str,
+    *,
+    status: str = "success",
+) -> None:
+    """Record source import status without promoting a partial import to success."""
     now = utc_now()
-    conn.execute(
-        """INSERT INTO source_sync(source,last_success_at,last_attempt_at,records_seen,status,details)
-           VALUES(?,?,?,?,?,?)
-           ON CONFLICT(source) DO UPDATE SET last_success_at=excluded.last_success_at,
-           last_attempt_at=excluded.last_attempt_at,records_seen=excluded.records_seen,
-           status='success',details=excluded.details""",
-        (source, now, now, count, "success", details),
-    )
+    if status == "success":
+        conn.execute(
+            """INSERT INTO source_sync(source,last_success_at,last_attempt_at,records_seen,status,details)
+               VALUES(?,?,?,?,?,?)
+               ON CONFLICT(source) DO UPDATE SET last_success_at=excluded.last_success_at,
+               last_attempt_at=excluded.last_attempt_at,records_seen=excluded.records_seen,
+               status='success',details=excluded.details""",
+            (source, now, now, count, "success", details),
+        )
+    else:
+        # Preserve the last-success timestamp and its record count. The current
+        # attempt may have imported useful rows, but it is not a complete snapshot.
+        conn.execute(
+            """INSERT INTO source_sync(source,last_attempt_at,status,details)
+               VALUES(?,?,?,?)
+               ON CONFLICT(source) DO UPDATE SET last_attempt_at=excluded.last_attempt_at,
+               status=excluded.status,details=excluded.details""",
+            (source, now, status, details),
+        )
 
 
 def _iter_nvd_items(source_path: Path) -> Iterable[dict[str, Any]]:
@@ -201,17 +220,26 @@ def _iter_nvd_items(source_path: Path) -> Iterable[dict[str, Any]]:
         yield from items
         return
 
-    # Validate the root key first, then reopen and stream one vulnerability at a time.
+    # Validate that the root-level key exists and is actually an array before
+    # streaming. Otherwise ijson.items() can silently yield zero rows for e.g.
+    # {"vulnerabilities": null}, unlike the standard JSON importer.
     try:
-        found_key = False
+        found_array = False
         with opener(source_path, "rb") as handle:
-            for prefix, event, value in ijson.parse(handle):
+            events = iter(ijson.parse(handle))
+            for prefix, event, value in events:
                 if prefix == "" and event == "map_key" and value == "vulnerabilities":
-                    found_key = True
+                    try:
+                        value_prefix, value_event, _ = next(events)
+                    except StopIteration as exc:
+                        raise ValueError("Expected NVD 2.0 JSON with a 'vulnerabilities' array") from exc
+                    if value_prefix != "vulnerabilities" or value_event != "start_array":
+                        raise ValueError("Expected NVD 2.0 JSON with a 'vulnerabilities' array")
+                    found_array = True
                     break
                 if prefix == "" and event == "end_map":
                     break
-        if not found_key:
+        if not found_array:
             raise ValueError("Expected NVD 2.0 JSON with a 'vulnerabilities' array")
         with opener(source_path, "rb") as handle:
             yield from ijson.items(handle, "vulnerabilities.item")
@@ -236,7 +264,7 @@ def import_nvd_json(path: str | Path, db_path: str | Path | None = None) -> int:
     count = 0
     try:
         with connect(db_path) as conn:
-            for item in _iter_nvd_items(source_path):
+            for record_index, item in enumerate(_iter_nvd_items(source_path), start=1):
                 if not isinstance(item, dict):
                     continue
                 cve = item.get("cve", item)
@@ -305,15 +333,20 @@ def import_kev_json(path: str | Path, db_path: str | Path | None = None) -> int:
     rows = payload.get("vulnerabilities") if isinstance(payload, dict) else None
     if not isinstance(rows, list):
         raise ValueError("Expected CISA KEV JSON with a 'vulnerabilities' array")
+    validated_rows: list[tuple[dict[str, Any], str]] = []
+    skipped_invalid_rows = 0
+    for record_index, row in enumerate(rows, start=1):
+        if not isinstance(row, dict):
+            skipped_invalid_rows += 1
+            continue
+        cve_id = row.get("cveID")
+        if not isinstance(cve_id, str) or not CVE_RE.fullmatch(cve_id.strip()):
+            skipped_invalid_rows += 1
+            continue
+        validated_rows.append((row, cve_id.strip().upper()))
     count = 0
     with connect(db_path) as conn:
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            cve_id = row.get("cveID")
-            if not isinstance(cve_id, str) or not CVE_RE.fullmatch(cve_id):
-                continue
-            cve_id = cve_id.upper()
+        for row, cve_id in validated_rows:
             desc = str(row.get("shortDescription") or row.get("vulnerabilityName") or "")
             _upsert_vulnerability(conn, cve_id=cve_id, source="CISA KEV", published=None,
                                   modified=None, description=desc, raw_json=row)
@@ -328,7 +361,14 @@ def import_kev_json(path: str | Path, db_path: str | Path | None = None) -> int:
                     (cve_id, notes_url, "CISA KEV notes", "[]"),
                 )
             count += 1
-        _update_source_sync(conn, "CISA KEV", count, f"Imported {source_path.name}")
+        details = (
+            f"Imported {source_path.name}; valid_rows={count}; "
+            f"skipped_invalid_rows={skipped_invalid_rows}"
+        )
+        _update_source_sync(
+            conn, "CISA KEV", count, details,
+            status="partial" if skipped_invalid_rows else "success",
+        )
     return count
 
 
@@ -344,6 +384,7 @@ def import_epss_csv(path: str | Path, db_path: str | Path | None = None) -> int:
     if not source_path.is_file():
         raise FileNotFoundError(f"EPSS CSV file not found: {source_path}")
     count = 0
+    skipped_invalid_rows = 0
     try:
         with _open_maybe_gzip(source_path) as handle, connect(db_path) as conn:
             data_lines = (line for line in handle if line.strip() and not line.lstrip().startswith("#"))
@@ -351,18 +392,22 @@ def import_epss_csv(path: str | Path, db_path: str | Path | None = None) -> int:
             required = {"cve", "epss", "percentile"}
             if not reader.fieldnames or not required.issubset({x.strip().lower() for x in reader.fieldnames}):
                 raise ValueError("Expected FIRST EPSS CSV columns: cve, epss, percentile")
-            # Preserve robust behavior if upstream capitalizes headers unexpectedly.
+            # Preserve robust behavior if upstream capitalizes headers unexpectedly, but
+            # make ignored data rows visible in source_sync details for auditability.
             for raw_row in reader:
                 row = {str(key).strip().lower(): value for key, value in raw_row.items() if key}
                 cve_id = (row.get("cve") or "").strip().upper()
                 if not CVE_RE.fullmatch(cve_id):
+                    skipped_invalid_rows += 1
                     continue
                 try:
                     epss = float(row["epss"])
                     percentile = float(row["percentile"])
                 except (TypeError, ValueError, KeyError):
+                    skipped_invalid_rows += 1
                     continue
                 if not (0.0 <= epss <= 1.0 and 0.0 <= percentile <= 1.0):
+                    skipped_invalid_rows += 1
                     continue
                 _upsert_vulnerability(conn, cve_id=cve_id, source="FIRST EPSS", published=None,
                                       modified=None, description="")
@@ -371,7 +416,11 @@ def import_epss_csv(path: str | Path, db_path: str | Path | None = None) -> int:
                     (epss, percentile, utc_now(), cve_id),
                 )
                 count += 1
-            _update_source_sync(conn, "FIRST EPSS", count, f"Imported {source_path.name}")
+            details = f"Imported {source_path.name}; valid_rows={count}; skipped_invalid_rows={skipped_invalid_rows}"
+            _update_source_sync(
+                conn, "FIRST EPSS", count, details,
+                status="partial" if skipped_invalid_rows else "success",
+            )
     except (OSError, gzip.BadGzipFile) as exc:
         raise ValueError(f"Could not read EPSS CSV {source_path}: {exc}") from exc
     return count
@@ -552,6 +601,10 @@ def search_product_cves(
     safe_limit = max(1, min(int(limit), 200))
     freshness = get_source_freshness(db_path)
     candidates: dict[str, dict[str, Any]] = {}
+    # Keep the full identity set independent of the per-CVE row display cap below.
+    # Otherwise a CVE with many CPE rows can hide additional product identities and
+    # make the ambiguity summary falsely appear narrower than the actual retrieval.
+    matched_identity_pairs: set[tuple[str, str]] = set()
 
     def like_pattern(term: str) -> str:
         escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
@@ -582,9 +635,10 @@ def search_product_cves(
     row_identity_key = ("matched_vendor", "matched_product", "matched_criteria", "version_start_including",
                         "version_start_excluding", "version_end_including", "version_end_excluding")
     match_class_rank = {
-        "exact_normalized_vendor_product": 3,
-        "all_query_terms_match": 2,
-        "partial_query_term_match": 1,
+        "exact_normalized_vendor_product": 4,
+        "all_query_terms_match": 3,
+        "partial_query_term_match": 2,
+        "vendor_only_match": 1,
     }
     version_rank = {
         "exact_cpe_version_match": 5,
@@ -614,6 +668,10 @@ def search_product_cves(
             matching = name_context["matching_query_terms"]
             if not matching:
                 continue
+            normalized_vendor = normalize_product_text(matched_vendor)
+            normalized_product = normalize_product_text(matched_product)
+            if normalized_vendor or normalized_product:
+                matched_identity_pairs.add((normalized_vendor, normalized_product))
             version_context = assess_version_context(target_version, row)
             score = name_context["name_match_score"]
             if name_context["name_match_class"] == "exact_normalized_vendor_product":
@@ -639,11 +697,14 @@ def search_product_cves(
                 "version_end_excluding": row["version_end_excluding"],
                 "product_relevance_score": score,
                 "matching_query_terms": matching,
+                "matching_vendor_terms": name_context["matching_vendor_terms"],
+                "matching_product_terms": name_context["matching_product_terms"],
                 "query_normalization": {
                     "original_query": query,
                     "normalized_product_query": name_context["normalized_query"],
                     "query_terms": terms,
                     "version_input_method": version_input_method,
+                    "version_input_conflict": version_input_method == "explicit_option_conflicts_with_query_suffix",
                     "target_vendor": vendor,
                     "normalized_target_vendor": requested_vendor or None,
                     "target_version": target_version,
@@ -709,12 +770,7 @@ def search_product_cves(
                 candidates[cve_id] = candidate
 
     results = list(candidates.values())
-    identities = sorted({
-        (normalize_product_text(row.get("vendor")), normalize_product_text(row.get("product")))
-        for candidate in results
-        for row in candidate.get("matching_product_rows", [])
-        if row.get("vendor") or row.get("product")
-    })
+    identities = sorted(matched_identity_pairs)
     ambiguity = {
         "status": "ambiguous_multiple_product_identities" if len(identities) > 1 else "single_or_unconfirmed_product_identity",
         "distinct_matched_product_identity_count": len(identities),
@@ -784,7 +840,7 @@ def import_reference_samples_json(path: str | Path, db_path: str | Path | None =
         raise ValueError("Expected JSON object with a 'samples' array")
     count = 0
     with connect(db_path) as conn:
-        for sample in samples:
+        for sample_index, sample in enumerate(samples, start=1):
             if not isinstance(sample, dict):
                 continue
             required = ("sample_id", "sha256", "file_type", "label", "source_name", "label_basis")
@@ -812,7 +868,10 @@ def import_reference_samples_json(path: str | Path, db_path: str | Path | None =
                  sample["source_name"], sample.get("source_url"), sample.get("product_name"), sample.get("product_version"),
                  sample["label_basis"], confidence, sample.get("notes", ""), utc_now()),
             )
-            for link in sample.get("cve_links", []) or []:
+            raw_links = sample.get("cve_links", []) or []
+            if not isinstance(raw_links, list):
+                raise ValueError(f"cve_links for sample {sample['sample_id']} must be an array")
+            for link_index, link in enumerate(raw_links, start=1):
                 if not isinstance(link, dict):
                     continue
                 cve_id = str(link.get("cve_id", "")).upper()

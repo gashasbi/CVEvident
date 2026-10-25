@@ -124,8 +124,17 @@ def test_sync_nvd_modified_paginates_and_passes_api_key_without_network(
     calls: list[tuple[int, dict[str, str]]] = []
     slept: list[float] = []
     payloads = {
-        0: {"totalResults": 3, "resultsPerPage": 2, "vulnerabilities": [{"id": 1}, {"id": 2}]},
-        2: {"totalResults": 3, "resultsPerPage": 2, "vulnerabilities": [{"id": 3}]},
+        0: {
+            "startIndex": 0, "totalResults": 3, "resultsPerPage": 2,
+            "vulnerabilities": [
+                {"cve": {"id": "CVE-2026-10001"}},
+                {"cve": {"id": "CVE-2026-10002"}},
+            ],
+        },
+        2: {
+            "startIndex": 2, "totalResults": 3, "resultsPerPage": 2,
+            "vulnerabilities": [{"cve": {"id": "CVE-2026-10003"}}],
+        },
     }
 
     def fake_request(url: str, headers=None):

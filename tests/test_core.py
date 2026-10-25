@@ -224,6 +224,7 @@ class DatabaseAndImportTests(TempProject):
             json.load(handle)
             yield ("", "start_map", None)
             yield ("", "map_key", "vulnerabilities")
+            yield ("vulnerabilities", "start_array", None)
         def fake_items(handle, prefix):
             self.assertEqual(prefix, "vulnerabilities.item")
             return iter(json.load(handle)["vulnerabilities"])
