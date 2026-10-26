@@ -305,3 +305,23 @@ def test_pdf_marker_offsets_limit_exact_and_over_limit():
     offsets, truncated = _find_pdf_name_offsets(data, marker, limit=2)
     assert offsets == [0, len(marker) + 1]
     assert truncated is True
+
+
+def test_pdf_header_offset_boundary_includes_last_allowed_start(tmp_path):
+    last_allowed = tmp_path / "header-at-1023.pdf"
+    last_allowed.write_bytes(b"x" * 1023 + b"%PDF-1.7\\n")
+
+    report = analyze_pdf(last_allowed)
+
+    assert report["metrics"]["pdf_header_found"] is True
+    assert report["metrics"]["pdf_header_offset"] == 1023
+    assert report["file"]["file_type"] == "pdf"
+
+    beyond_limit = tmp_path / "header-at-1024.pdf"
+    beyond_limit.write_bytes(b"x" * 1024 + b"%PDF-1.7\\n")
+
+    report = analyze_pdf(beyond_limit)
+
+    assert report["metrics"]["pdf_header_found"] is False
+    assert report["metrics"]["pdf_header_offset"] is None
+    assert report["structural_analysis"]["status"] == "skipped_not_pdf"
