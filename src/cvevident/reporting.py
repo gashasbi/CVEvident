@@ -221,6 +221,27 @@ def to_markdown(report: dict[str, Any]) -> str:
             f"`{_report_single_line(item.get('value'))}` "
             f"({_report_single_line(item.get('severity', 'info'))})"
         )
+        traceability = details.get("traceability")
+        if isinstance(traceability, dict):
+            extraction_method = traceability.get("extraction_method")
+            if extraction_method:
+                lines.append(
+                    f"   - Extraction method: `{_report_single_line(extraction_method)}`"
+                )
+            if "observed_value" in traceability:
+                observed_text = json.dumps(
+                    traceability["observed_value"], ensure_ascii=False, sort_keys=True
+                )
+                lines.append(
+                    f"   - Traceable observed value: `{_report_single_line(observed_text)}`"
+                )
+            limitations = traceability.get("analysis_limitations") or []
+            if limitations:
+                rendered_limitations = "; ".join(
+                    _report_single_line(value) for value in limitations
+                )
+                lines.append(f"   - Analysis limitations: {rendered_limitations}")
+
         if details.get("description"):
             lines.append(f"   - {_report_single_line(details['description'])}")
         if details.get("interpretation"):
@@ -449,6 +470,31 @@ def to_markdown(report: dict[str, Any]) -> str:
                 if basis.get("interpretation"):
                     lines.append(f"    - Interpretation: {_report_single_line(basis['interpretation'])}")
     lines += ["", "Association ordering is for review only; it is not a calibrated probability or proof of exploitability."]
+    feature_assessments = (report.get("analysis_coverage") or {}).get(
+        "feature_assessments", []
+    )
+    if feature_assessments:
+        lines += ["", "## Feature assessment", ""]
+        for assessment in feature_assessments:
+            section = _report_single_line(assessment.get("parser_section", "unknown"))
+            feature = _report_single_line(assessment.get("feature", "unknown"))
+            status = _report_single_line(assessment.get("status", "not_assessed"))
+            method = _report_single_line(assessment.get("extraction_method", "unknown"))
+            observed_text = _report_single_line(
+                json.dumps(assessment.get("observed_value"), ensure_ascii=False, sort_keys=True)
+            )
+            scope = assessment.get("inspected_scope") or {}
+            scope_text = _report_single_line(
+                f"{scope.get('count', 0)} {scope.get('unit', 'units')}"
+            )
+            lines.append(
+                f"- `{section}.{feature}` — status: `{status}`; "
+                f"observed value: `{observed_text}`; method: `{method}`; "
+                f"inspected scope: `{scope_text}`."
+            )
+            for limitation in assessment.get("analysis_limitations", []) or []:
+                lines.append(f"  - Limitation: {_report_single_line(limitation)}")
+
     lines += ["", "## Warnings", ""]
     lines.extend(
         f"- {_report_single_line(warning)}"

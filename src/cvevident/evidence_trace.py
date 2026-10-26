@@ -345,6 +345,224 @@ def _source_locator(item: dict[str, Any], report: dict[str, Any]) -> dict[str, A
         "limitation": "The producing parser did not emit a narrower source coordinate for this evidence item.",
     }
 
+def _extraction_method(item: dict[str, Any]) -> str:
+    kind = str(item.get("evidence_type", "unknown"))
+    key = str(item.get("key", ""))
+
+    if kind == "pdf_lexical_marker":
+        return "bounded_pdf_input_byte_scan"
+    if kind.startswith("pdf_structural"):
+        return "pypdf_object_graph_traversal"
+    if (
+        kind == "pdf_parser"
+        or kind.endswith("_status")
+        or key.endswith("_status")
+        or key.endswith(".status")
+    ):
+        return "parser_status_and_coverage_reporting"
+    if kind == "file_identity":
+        if key == "sha256":
+            return "sha256_digest_of_input_bytes"
+        if key == "file_size_bytes":
+            return "input_byte_length"
+        return "input_file_metadata_read"
+    if kind == "format_check":
+        if "extension_mismatch" in key:
+            return "filename_extension_vs_detected_format_comparison"
+        return "input_signature_or_format_header_check"
+    if kind == "reference_sample_match":
+        return "local_reference_sample_sha256_lookup"
+    if kind == "product_context_candidate":
+        return "local_vulnerability_database_product_context_lookup"
+    if kind.startswith("office_") or key.startswith("office."):
+        return "bounded_ooxml_zip_and_xml_inspection"
+    if kind.startswith("odf_") or key.startswith("odf."):
+        return "bounded_opendocument_zip_and_xml_inspection"
+    if kind.startswith("legacy_office_") or key.startswith("legacy_office."):
+        return "bounded_ole_cfb_directory_inspection"
+    if kind.startswith("rtf_") or key.startswith("rtf."):
+        return "bounded_rtf_scan"
+    return "parser_reported_observation"
+
+
+def _safe_observed_value(value: Any) -> Any:
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        normalized = " ".join(value.split())
+        if len(normalized) <= 500:
+            return normalized
+        return {"preview": normalized[:500], "truncated": True}
+    if isinstance(value, dict):
+        return {
+            "type": "object",
+            "key_count": len(value),
+            "keys_preview": [str(key)[:100] for key in list(value)[:20]],
+        }
+    if isinstance(value, (list, tuple, set)):
+        return {"type": "collection", "item_count": len(value)}
+    return {"type": type(value).__name__}
+
+
+def _evidence_parser_section(item: dict[str, Any]) -> str | None:
+    kind = str(item.get("evidence_type", ""))
+    key = str(item.get("key", ""))
+
+    if kind.startswith("pdf_structural") or kind == "pdf_parser" or key.startswith("pdf.structure."):
+        return "structural_analysis"
+    if kind.startswith("office_") or key.startswith("office."):
+        return "office_analysis"
+    if kind.startswith("odf_") or key.startswith("odf."):
+        return "odf_analysis"
+    if kind.startswith("legacy_office_") or key.startswith("legacy_office."):
+        return "legacy_office_analysis"
+    if kind.startswith("rtf_") or key.startswith("rtf."):
+        return "rtf_analysis"
+    return None
+
+
+def _evidence_limitations(
+    item: dict[str, Any], locator: dict[str, Any], report: dict[str, Any]
+) -> list[str]:
+    limitations: list[str] = []
+    kind = str(item.get("evidence_type", ""))
+
+    if kind == "file_identity":
+        limitations.append(
+            "File identity metadata describes the input bytes; it is not a content finding "
+            "and does not establish file safety."
+        )
+    elif kind == "format_check":
+        limitations.append(
+            "Format identification is a static check; it does not establish that the file "
+            "is well-formed or safe."
+        )
+    elif kind == "reference_sample_match":
+        limitations.append(
+            "A local reference-sample hash match is a byte-identity association, not proof "
+            "of exploitability or malicious behavior."
+        )
+    elif kind == "product_context_candidate":
+        limitations.append(
+            "Product context is a local database association, not attribution of this file "
+            "to a vulnerable product or proof of exploitability."
+        )
+
+    locator_limitation = locator.get("limitation")
+    if isinstance(locator_limitation, str) and locator_limitation:
+        limitations.append(locator_limitation)
+
+    section = _evidence_parser_section(item)
+    parser = report.get(section) if section else None
+    if isinstance(parser, dict):
+        status = str(parser.get("status", "unknown")).lower()
+        if status in {"partial", "failed", "unavailable", "unsupported", "unknown", "encrypted"}:
+            limitations.append(f"{section} reports parser status '{status}'.")
+        if (
+            parser.get("truncated")
+            or parser.get("findings_truncated")
+            or parser.get("inventory_truncated")
+        ):
+            limitations.append(
+                "Parser output was truncated or capped; uninspected content is not represented by this observation."
+            )
+
+    if not limitations:
+        limitations.append(
+            "This is a static parser observation; it does not establish file safety or exploitability."
+        )
+    return list(dict.fromkeys(limitations))
+
+
+def _feature_assessments(report: dict[str, Any]) -> list[dict[str, Any]]:
+    specifications = (
+        ("structural_analysis", "pypdf_object_graph_traversal", "containers_inspected", "PDF object containers"),
+        ("office_analysis", "bounded_ooxml_zip_and_xml_inspection", "xml_parts_inspected", "XML parts"),
+        ("odf_analysis", "bounded_opendocument_zip_and_xml_inspection", "xml_parts_inspected", "XML parts"),
+        ("legacy_office_analysis", "bounded_ole_cfb_directory_inspection", "directory_entry_count", "CFB directory entries"),
+        ("rtf_analysis", "bounded_rtf_scan", "bytes_scanned", "bytes"),
+    )
+    hard_incomplete_statuses = {
+        "failed", "unavailable", "unsupported", "unknown", "encrypted",
+    }
+    results: list[dict[str, Any]] = []
+
+    for section, method, count_key, unit in specifications:
+        parser = report.get(section)
+        if not isinstance(parser, dict):
+            continue
+        features = parser.get("features")
+        if not isinstance(features, dict):
+            continue
+
+        parser_status = str(parser.get("status", "unknown")).lower()
+        truncated = bool(
+            parser.get("truncated")
+            or parser.get("findings_truncated")
+            or parser.get("inventory_truncated")
+        )
+        inspected_count = parser.get(count_key, 0)
+        if not isinstance(inspected_count, int) or isinstance(inspected_count, bool):
+            inspected_count = 0
+        inspected_count = max(0, inspected_count)
+
+        for feature, value in sorted(features.items(), key=lambda pair: str(pair[0])):
+            if value is True:
+                status = "observed"
+            elif isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
+                status = "observed"
+            elif isinstance(value, (str, list, tuple, dict, set)) and bool(value):
+                status = "observed"
+            elif value is None:
+                status = "not_assessed"
+            elif parser_status in hard_incomplete_statuses or inspected_count == 0:
+                status = "not_assessed"
+            elif parser_status == "partial" or truncated:
+                status = "not_found_in_inspected_scope"
+            else:
+                status = "not_found"
+
+            if status == "observed":
+                limitations = [
+                    "Static observation only; this does not establish maliciousness or exploitability."
+                ]
+            elif status == "not_found":
+                limitations = [
+                    "No instance was recorded in the completed declared static scope; absence does not establish safety."
+                ]
+            elif status == "not_found_in_inspected_scope":
+                limitations = [
+                    "No instance was recorded in the inspected scope; uninspected content may contain additional instances."
+                ]
+            else:
+                limitations = [
+                    "The relevant feature could not be assessed reliably; absence must not be inferred."
+                ]
+
+            if parser_status in hard_incomplete_statuses or parser_status == "partial" or truncated:
+                limitations.append(
+                    f"{section} status is '{parser_status}'"
+                    + (" and its output was truncated or capped." if truncated else ".")
+                )
+                parser_warnings = parser.get("warnings", [])
+                if isinstance(parser_warnings, list):
+                    limitations.extend(
+                        str(warning) for warning in parser_warnings[:3] if warning
+                    )
+
+            results.append({
+                "parser_section": section,
+                "feature": str(feature),
+                "status": status,
+                "observed_value": _safe_observed_value(value),
+                "extraction_method": method,
+                "inspected_scope": {"count": inspected_count, "unit": unit},
+                "analysis_limitations": list(dict.fromkeys(limitations)),
+            })
+
+    return results
+
+
 def finalize_evidence_traceability(report: dict[str, Any]) -> None:
     """Assign report-local IDs, attach locators and summarize analysis coverage."""
     evidence = report.setdefault("evidence", [])
@@ -375,9 +593,13 @@ def finalize_evidence_traceability(report: dict[str, Any]) -> None:
             item["details"] = details
         details["traceability"] = {
             "evidence_id": evidence_id,
+            "evidence_type": str(item.get("evidence_type", "unknown")),
             "evidence_class": evidence_class,
             "evidence_origin": item["evidence_origin"],
+            "extraction_method": _extraction_method(item),
+            "observed_value": _safe_observed_value(item.get("value")),
             "source_locator": locator,
+            "analysis_limitations": _evidence_limitations(item, locator, report),
         }
         class_counts[evidence_class] += 1
         locator_counts[str(locator.get("kind", "unknown"))] += 1
@@ -445,6 +667,7 @@ def finalize_evidence_traceability(report: dict[str, Any]) -> None:
         and parser_status not in incomplete_statuses
         and not truncated
     )
+    feature_assessments = _feature_assessments(report)
     report["analysis_coverage"] = {
         "schema_version": 1,
         "parser_section": section_name,
@@ -459,6 +682,7 @@ def finalize_evidence_traceability(report: dict[str, Any]) -> None:
         "limitation_reasons": limitation_reasons,
         "absence_of_findings_means": _ABSENCE_CAVEAT,
         "interpretation": "Coverage status describes the declared static inspection only; it is not a safety determination.",
+        "feature_assessments": feature_assessments,
     }
 
     # The normal Markdown/HTML report already renders warnings. Add concise coverage

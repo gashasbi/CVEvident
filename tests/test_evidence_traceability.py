@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from cvevident.evidence_engine import build_cve_associations, evidence_summary
@@ -9,7 +10,7 @@ from cvevident.evidence_trace import (
     finalize_evidence_traceability,
 )
 from cvevident.pdf_triage import analyze_pdf
-from cvevident.reporting import to_markdown
+from cvevident.reporting import serialize_json, to_html, to_markdown
 
 def _traceable_report() -> dict:
     return {
@@ -245,3 +246,194 @@ def test_package_relation_and_directory_records_keep_source_locations() -> None:
     legacy_record = next(item for item in report["evidence"] if item["evidence_type"] == "legacy_office_directory_entry")
     assert legacy_record["source_locator"]["kind"] == "ole_cfb_directory_inventory_entry"
     assert legacy_record["source_locator"]["name"] == "VBA/dir"
+
+
+
+def test_traceability_exposes_method_value_and_consistent_feature_assessments() -> None:
+    report = _traceable_report()
+    report["warnings"] = []
+    report["structural_analysis"].update({
+        "status": "partial",
+        "truncated": True,
+        "findings_truncated": True,
+        "containers_inspected": 2,
+        "features": {
+            "javascript_action_count": 0,
+            "launch_action_count": 1,
+        },
+        "warnings": [],
+    })
+
+    finalize_evidence_traceability(report)
+
+    finding = report["evidence"][0]
+    trace = finding["details"]["traceability"]
+
+    assert trace["evidence_type"] == "pdf_structural_finding"
+    assert trace["extraction_method"] == "pypdf_object_graph_traversal"
+    assert trace["observed_value"] is True
+    assert trace["source_locator"] == finding["source_locator"]
+    assert trace["analysis_limitations"]
+
+    assessments = {
+        item["feature"]: item
+        for item in report["analysis_coverage"]["feature_assessments"]
+    }
+    assert assessments["launch_action_count"]["status"] == "observed"
+    assert assessments["javascript_action_count"]["status"] == "not_found_in_inspected_scope"
+
+    encoded = json.loads(serialize_json(report))
+    assert encoded["analysis_coverage"]["feature_assessments"] == report["analysis_coverage"]["feature_assessments"]
+
+    markdown = to_markdown(report)
+    html = to_html(report)
+
+    assert "Extraction method: `pypdf_object_graph_traversal`" in markdown
+    assert "not_found_in_inspected_scope" in markdown
+    assert "pypdf_object_graph_traversal" in html
+    assert "not_found_in_inspected_scope" in html
+
+
+def test_traceability_extraction_methods_match_the_actual_evidence_kind() -> None:
+    report = _traceable_report()
+    report["office_analysis"] = {
+        "status": "failed",
+        "truncated": False,
+        "features": {},
+        "warnings": [],
+    }
+    report["evidence"] = [
+        {
+            "evidence_type": "format_check",
+            "key": "office.extension_mismatch",
+            "value": True,
+            "severity": "info",
+            "details": {},
+        },
+        {
+            "evidence_type": "office_package_status",
+            "key": "office.package_status",
+            "value": "failed",
+            "severity": "warning",
+            "details": {},
+        },
+        {
+            "evidence_type": "file_identity",
+            "key": "sha256",
+            "value": "a" * 64,
+            "severity": "info",
+            "details": {"algorithm": "SHA-256"},
+        },
+    ]
+
+    finalize_evidence_traceability(report)
+    by_key = {item["key"]: item for item in report["evidence"]}
+
+    extension_trace = by_key["office.extension_mismatch"]["details"]["traceability"]
+    status_trace = by_key["office.package_status"]["details"]["traceability"]
+    identity_trace = by_key["sha256"]["details"]["traceability"]
+
+    assert extension_trace["extraction_method"] == "filename_extension_vs_detected_format_comparison"
+    assert status_trace["extraction_method"] == "parser_status_and_coverage_reporting"
+    assert any(
+        "file identity metadata" in limitation.lower()
+        for limitation in identity_trace["analysis_limitations"]
+    )
+
+
+def test_traceability_extraction_methods_match_the_actual_evidence_kind() -> None:
+    report = _traceable_report()
+    report["office_analysis"] = {
+        "status": "failed",
+        "truncated": False,
+        "features": {},
+        "warnings": [],
+    }
+    report["evidence"] = [
+        {
+            "evidence_type": "format_check",
+            "key": "office.extension_mismatch",
+            "value": True,
+            "severity": "info",
+            "details": {},
+        },
+        {
+            "evidence_type": "office_package_status",
+            "key": "office.package_status",
+            "value": "failed",
+            "severity": "warning",
+            "details": {},
+        },
+        {
+            "evidence_type": "file_identity",
+            "key": "sha256",
+            "value": "a" * 64,
+            "severity": "info",
+            "details": {"algorithm": "SHA-256"},
+        },
+    ]
+
+    finalize_evidence_traceability(report)
+    by_key = {item["key"]: item for item in report["evidence"]}
+
+    extension_trace = by_key["office.extension_mismatch"]["details"]["traceability"]
+    status_trace = by_key["office.package_status"]["details"]["traceability"]
+    identity_trace = by_key["sha256"]["details"]["traceability"]
+
+    assert extension_trace["extraction_method"] == "filename_extension_vs_detected_format_comparison"
+    assert status_trace["extraction_method"] == "parser_status_and_coverage_reporting"
+    assert any(
+        "file identity metadata" in limitation.lower()
+        for limitation in identity_trace["analysis_limitations"]
+    )
+
+
+def test_feature_assessments_distinguish_absent_from_unassessed() -> None:
+    cases = (
+        ("parsed", False, 2, "not_found"),
+        ("parsed", True, 2, "not_found_in_inspected_scope"),
+        ("partial", True, 2, "not_found_in_inspected_scope"),
+        ("failed", False, 2, "not_assessed"),
+        ("failed", False, 0, "not_assessed"),
+    )
+
+    for status, truncated, inspected, expected in cases:
+        report = _traceable_report()
+        report["warnings"] = []
+        report["structural_analysis"].update({
+            "status": status,
+            "truncated": truncated,
+            "findings_truncated": truncated,
+            "containers_inspected": inspected,
+            "features": {"javascript_action_count": 0},
+            "warnings": [],
+        })
+
+        finalize_evidence_traceability(report)
+
+        assessments = {
+            item["feature"]: item
+            for item in report["analysis_coverage"]["feature_assessments"]
+        }
+        assessment = assessments["javascript_action_count"]
+        assert assessment["status"] == expected
+
+        limitations = " ".join(assessment["analysis_limitations"])
+        if expected == "not_found":
+            assert "completed declared static scope" in limitations
+        elif expected == "not_found_in_inspected_scope":
+            assert "uninspected content" in limitations
+        else:
+            assert "absence must not be inferred" in limitations
+
+        encoded = json.loads(serialize_json(report))
+        serialized_assessment = next(
+            item for item in encoded["analysis_coverage"]["feature_assessments"]
+            if item["feature"] == "javascript_action_count"
+        )
+        assert serialized_assessment["status"] == expected
+
+        markdown = to_markdown(report)
+        html = to_html(report)
+        assert expected in markdown
+        assert expected in html

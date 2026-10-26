@@ -177,6 +177,32 @@ class ProjectAcceptanceClosureTests(unittest.TestCase):
                 self.assertEqual(report["assessment"]["verdict"], "not_assessed")
                 self.assertIn("analysis_coverage", report)
                 self.assertIn("evidence_traceability", report)
+
+                coverage = report["analysis_coverage"]
+                assessments = coverage.get("feature_assessments")
+                self.assertIsInstance(assessments, list)
+                parser_section = coverage.get("parser_section")
+                parser_result = report.get(parser_section) if parser_section else None
+                features = (
+                    parser_result.get("features", {})
+                    if isinstance(parser_result, dict)
+                    else {}
+                )
+                self.assertEqual(
+                    {item["feature"] for item in assessments},
+                    {str(name) for name in features},
+                )
+                valid_statuses = {
+                    "observed",
+                    "not_found",
+                    "not_found_in_inspected_scope",
+                    "not_assessed",
+                }
+                for assessment in assessments:
+                    self.assertIn(assessment["status"], valid_statuses)
+                    self.assertTrue(assessment["extraction_method"])
+                    self.assertIn("observed_value", assessment)
+                    self.assertTrue(assessment["analysis_limitations"])
                 self.assertIn(
                     "does not establish that the file is safe",
                     report["analysis_coverage"]["absence_of_findings_means"],
@@ -188,20 +214,51 @@ class ProjectAcceptanceClosureTests(unittest.TestCase):
                 for item in evidence:
                     self.assertTrue(item.get("evidence_id"))
                     self.assertEqual(item["source_locator"].get("input_sha256"), report["file"]["sha256"])
-                    self.assertEqual(
-                        item["details"]["traceability"]["evidence_id"],
-                        item["evidence_id"],
-                    )
+                    trace = item["details"]["traceability"]
+                    self.assertEqual(trace["evidence_id"], item["evidence_id"])
+                    self.assertEqual(trace["evidence_type"], item["evidence_type"])
+                    self.assertTrue(trace["extraction_method"])
+                    self.assertIn("observed_value", trace)
+                    self.assertEqual(trace["source_locator"], item["source_locator"])
+                    self.assertTrue(trace["analysis_limitations"])
 
                 loaded = get_analysis(report["analysis_id"], self.db)
                 self.assertIsNotNone(loaded)
                 loaded_ids = [item.get("evidence_id") for item in loaded["evidence"]]
                 self.assertEqual(loaded_ids, evidence_ids)
                 self.assertTrue(all(item.get("source_locator") for item in loaded["evidence"]))
+                self.assertEqual(
+                    loaded["analysis_coverage"]["feature_assessments"],
+                    assessments,
+                )
+                for original_item, loaded_item in zip(evidence, loaded["evidence"]):
+                    for field in (
+                        "evidence_type",
+                        "extraction_method",
+                        "observed_value",
+                        "source_locator",
+                        "analysis_limitations",
+                    ):
+                        self.assertEqual(
+                            original_item["details"]["traceability"][field],
+                            loaded_item["details"]["traceability"][field],
+                        )
                 markdown = to_markdown(loaded)
                 html = to_html(loaded)
                 self.assertIn("Evidence ID", markdown)
                 self.assertIn("Evidence ID", html)
+                if assessments:
+                    first_assessment = assessments[0]
+                    feature_label = (
+                        f"{first_assessment['parser_section']}."
+                        f"{first_assessment['feature']}"
+                    )
+                    self.assertIn("Feature assessment", markdown)
+                    self.assertIn("Feature assessment", html)
+                    self.assertIn(feature_label, markdown)
+                    self.assertIn(feature_label, html)
+                    self.assertIn(first_assessment["status"], markdown)
+                    self.assertIn(first_assessment["status"], html)
                 self.assertIn("does not establish that the file is safe", markdown.lower())
                 self.assertIn("CVEvident Analysis Report", html)
                 encoded = json.loads(serialize_json(loaded))
