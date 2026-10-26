@@ -253,6 +253,20 @@ class DispatchFailureMatrixTests(unittest.TestCase):
         self.assertIn(report["odf_analysis"]["status"], {"partial", "failed"})
         self.assertTrue(report["odf_analysis"]["warnings"])
 
+    def test_corrupt_ooxml_deflate_stream_is_reported_without_uncaught_error(self):
+        damaged = _corrupt_first_compressed_byte(
+            _ooxml_bytes(), "word/document.xml"
+        )
+        report = self._analyze("damaged-deflate.docx", damaged)
+        analysis = report["office_analysis"]
+
+        self.assertIn(analysis["status"], {"partial", "failed"})
+        self.assertTrue(analysis["warnings"])
+        self.assertEqual(report["assessment"]["verdict"], "not_assessed")
+        self.assertFalse(
+            report["analysis_coverage"]["complete_for_declared_static_scope"]
+        )
+
     def test_missing_files_are_reported_by_the_selected_analyzer(self):
         for filename in ("missing.pdf", "missing.docx", "missing.odt", "missing.rtf", "missing.doc"):
             with self.subTest(filename=filename):
