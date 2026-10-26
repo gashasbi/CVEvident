@@ -348,3 +348,27 @@ def test_non_integer_declared_pdf_page_count_is_not_trusted(monkeypatch):
         and "not trusted" in warning.lower()
         for warning in result["warnings"]
     )
+
+def test_declared_page_count_upper_boundary_and_one_over(monkeypatch):
+    def report_for_count(count):
+        pages = DictionaryObject({
+            NameObject("/Count"): NumberObject(count)
+        })
+        root = DictionaryObject({
+            NameObject("/Pages"): pages
+        })
+        trailer = DictionaryObject({
+            NameObject("/Root"): root
+        })
+        return analyze_fake_pdf(monkeypatch, trailer)
+
+    exact_limit = report_for_count(10_000_000)
+    assert exact_limit["page_count_declared"] == 10_000_000
+
+    over_limit = report_for_count(10_000_001)
+    assert over_limit["page_count_declared"] is None
+    assert any(
+        "declared page count was outside the reporting range"
+        in warning.lower()
+        for warning in over_limit["warnings"]
+    )
