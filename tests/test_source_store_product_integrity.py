@@ -9,6 +9,8 @@ from unittest.mock import patch
 
 import pytest
 
+import cvevident.sources as sources
+
 from cvevident.db import connect, init_db
 from cvevident.evidence_engine import build_product_context
 from cvevident.product_matching import classify_name_match, split_product_version
@@ -207,9 +209,16 @@ def test_nvd_import_rolls_back_when_second_record_processing_fails(tmp_path: Pat
     assert get_cve("CVE-2099-12345", db) is None
     assert get_cve("CVE-2099-12346", db) is None
     with connect(db) as conn:
-        assert conn.execute(
-            "SELECT COUNT(*) FROM source_sync WHERE source='NVD'"
-        ).fetchone()[0] == 0
+        state = conn.execute(
+            "SELECT last_success_at,records_seen,status,details "
+            "FROM source_sync WHERE source='NVD'"
+        ).fetchone()
+
+    assert state is not None
+    assert state["last_success_at"] is None
+    assert state["records_seen"] == 0
+    assert state["status"] == "error"
+    assert "intentional second-record failure" in state["details"]
 
 
 def test_kev_import_prevalidates_all_rows_before_mutating_database(tmp_path: Path) -> None:
@@ -509,7 +518,16 @@ def test_streaming_nvd_import_rejects_non_array_vulnerabilities_root(tmp_path: P
 
     with connect(db) as conn:
         assert conn.execute("SELECT COUNT(*) FROM vulnerabilities").fetchone()[0] == 0
-        assert conn.execute("SELECT COUNT(*) FROM source_sync WHERE source='NVD'").fetchone()[0] == 0
+        state = conn.execute(
+            "SELECT last_success_at,records_seen,status,details "
+            "FROM source_sync WHERE source='NVD'"
+        ).fetchone()
+
+    assert state is not None
+    assert state["last_success_at"] is None
+    assert state["records_seen"] == 0
+    assert state["status"] == "error"
+    assert "vulnerabilities" in state["details"].lower()
 
 
 def test_reimporting_same_nvd_record_is_idempotent_for_related_rows(tmp_path: Path) -> None:
@@ -659,3 +677,523 @@ def test_explicit_version_suffix_edge_cases_are_conservative() -> None:
     assert split_product_version("Acme Viewer 2.0", "2.0.0") == (
         "Acme Viewer", "2.0.0", "explicit_option"
     )
+
+def test_nvd_modified_sync_rejects_duplicate_cve_ids_across_pages_without_import(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "local.sqlite3"
+    init_db(db)
+    cache = tmp_path / "cache"
+    prior_success = "2025-01-02T03:04:05+00:00"
+
+    with connect(db) as conn:
+        conn.execute(
+            "INSERT INTO source_sync(source,last_success_at,last_attempt_at,records_seen,status,details) "
+            "VALUES('NVD',?,?,?,?,?)",
+            (prior_success, prior_success, 42, "success", "prior-good-import"),
+        )
+
+    duplicate = _nvd_record("CVE-2099-12345")
+    pages = [
+        _page(0, 2, [duplicate]),
+        _page(1, 2, [duplicate]),
+    ]
+
+    with patch("cvevident.sources._request_json", side_effect=pages), \
+         patch("cvevident.sources.time.sleep"):
+        with pytest.raises(RuntimeError, match="duplicate CVE ID"):
+            sync_nvd_modified(db, days=1, cache_dir=cache, sleep_seconds=0)
+
+    assert get_cve("CVE-2099-12345", db) is None
+    with connect(db) as conn:
+        state = conn.execute(
+            "SELECT last_success_at,last_attempt_at,records_seen,status "
+            "FROM source_sync WHERE source='NVD'"
+        ).fetchone()
+
+    assert state["last_success_at"] == prior_success
+    assert state["records_seen"] == 42
+    assert state["status"] == "error"
+    assert state["last_attempt_at"] != prior_success
+    assert not list(cache.glob("nvd-*.json"))
+    assert not list(cache.glob("nvd-modified-aggregate-*.json"))
+
+
+def test_nvd_import_skipped_invalid_records_marks_partial_and_preserves_last_success(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "local.sqlite3"
+    init_db(db)
+    prior_success = "2025-01-02T03:04:05+00:00"
+
+    with connect(db) as conn:
+        conn.execute(
+            "INSERT INTO source_sync(source,last_success_at,last_attempt_at,records_seen,status,details) "
+            "VALUES('NVD',?,?,?,?,?)",
+            (prior_success, prior_success, 41, "success", "prior-good-import"),
+        )
+
+    source = tmp_path / "nvd-partial.json"
+    source.write_text(
+        json.dumps({
+            "vulnerabilities": [
+                _nvd_record("CVE-2099-12346"),
+                None,
+            ]
+        }),
+        encoding="utf-8",
+    )
+
+    assert import_nvd_json(source, db) == 1
+    assert get_cve("CVE-2099-12346", db) is not None
+
+    with connect(db) as conn:
+        state = conn.execute(
+            "SELECT last_success_at,last_attempt_at,records_seen,status,details "
+            "FROM source_sync WHERE source='NVD'"
+        ).fetchone()
+
+    assert state["last_success_at"] == prior_success
+    assert state["records_seen"] == 41
+    assert state["status"] == "partial"
+    assert state["last_attempt_at"] != prior_success
+    assert "valid_records=1" in state["details"]
+    assert "skipped_invalid_records=1" in state["details"]
+
+def test_nvd_modified_sync_publishes_manifest_after_complete_import(
+    tmp_path: Path,
+) -> None:
+    import hashlib
+
+    db = tmp_path / "local.sqlite3"
+    init_db(db)
+    cache = tmp_path / "cache"
+    pages = [
+        _page(0, 2, [_nvd_record("CVE-2099-12345")]),
+        _page(1, 2, [_nvd_record("CVE-2099-12346")]),
+    ]
+
+    with patch("cvevident.sources._request_json", side_effect=pages), \
+         patch("cvevident.sources.time.sleep"):
+        imported = sync_nvd_modified(
+            db, days=1, cache_dir=cache, sleep_seconds=0
+        )
+
+    assert imported == 2
+
+    manifests = list(cache.glob("nvd-modified-run-*.meta"))
+    assert len(manifests) == 1, f"Expected one completed manifest, found {manifests}"
+    manifest_path = manifests[0]
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    assert manifest["schema_version"] == 1
+    assert manifest["source"] == "NVD"
+    assert manifest["status"] == "imported"
+    assert manifest["validation"]["state"] == "complete"
+    assert manifest["validation"]["pagination_total_consistent"] is True
+    assert manifest["validation"]["unique_cve_ids"] is True
+    assert manifest["validation"]["totalResults"] == 2
+    assert manifest["validation"]["records_received"] == 2
+    assert manifest["database_import"] == {
+        "state": "success",
+        "records_imported": 2,
+    }
+
+    request = manifest["request"]
+    assert request["endpoint"]
+    assert request["lastModStartDate"]
+    assert request["lastModEndDate"]
+    assert request["resultsPerPage"] == 2000
+    assert "apiKey" not in json.dumps(manifest)
+
+    page_entries = manifest["pages"]
+    assert len(page_entries) == 2
+
+    for entry in page_entries:
+        page_path = cache / entry["file"]
+        assert page_path.is_file(), f"Missing published cache page: {page_path}"
+        raw = page_path.read_bytes()
+        assert hashlib.sha256(raw).hexdigest() == entry["sha256"]
+
+        payload = json.loads(raw)
+        assert payload["startIndex"] == entry["startIndex"]
+        assert payload["resultsPerPage"] == entry["resultsPerPage"]
+        assert payload["totalResults"] == entry["totalResults"]
+        assert len(payload["vulnerabilities"]) == entry["record_count"]
+
+    with connect(db) as conn:
+        state = conn.execute(
+            "SELECT last_success_at,records_seen,status "
+            "FROM source_sync WHERE source='NVD'"
+        ).fetchone()
+
+    assert state["status"] == "success"
+    assert state["last_success_at"]
+    assert state["records_seen"] == 2
+    assert not list(cache.glob("*.part"))
+    assert not list(cache.glob("nvd-modified-stage-*"))
+
+def test_sync_kev_invalid_download_preserves_previous_cache_and_marks_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = init_db(tmp_path / "local.sqlite3")
+    destination = tmp_path / "known_exploited_vulnerabilities.json"
+    previous_cache = b'{"vulnerabilities": []}'
+    destination.write_bytes(previous_cache)
+
+    def fake_download(_url, target, **_kwargs):
+        target = Path(target)
+        target.write_bytes(b'{"vulnerabilities":')
+        return target
+
+    monkeypatch.setattr(sources, "download", fake_download)
+
+    with pytest.raises(ValueError):
+        sources.sync_kev(db_path=db, destination=destination)
+
+    assert destination.read_bytes() == previous_cache
+    with connect(db) as conn:
+        state = conn.execute(
+            "SELECT last_success_at,status,details FROM source_sync "
+            "WHERE source='CISA KEV'"
+        ).fetchone()
+    assert state is not None
+    assert state["status"] == "error"
+    assert state["last_success_at"] is None
+
+
+def test_sync_epss_truncated_gzip_preserves_previous_cache_and_marks_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = init_db(tmp_path / "local.sqlite3")
+    destination = tmp_path / "epss_scores-current.csv.gz"
+
+    previous_cache = gzip.compress(
+        b"cve,epss,percentile\nCVE-2099-12345,0.4,0.9\n"
+    )
+    destination.write_bytes(previous_cache)
+
+    truncated_gzip = gzip.compress(
+        b"cve,epss,percentile\nCVE-2099-12346,0.5,0.8\n"
+    )[:-4]
+
+    def fake_download(_url, target, **_kwargs):
+        target = Path(target)
+        target.write_bytes(truncated_gzip)
+        return target
+
+    monkeypatch.setattr(sources, "download", fake_download)
+
+    with pytest.raises(ValueError):
+        sources.sync_epss(db_path=db, destination=destination)
+
+    assert destination.read_bytes() == previous_cache
+    with connect(db) as conn:
+        state = conn.execute(
+            "SELECT last_success_at,status,details FROM source_sync "
+            "WHERE source='FIRST EPSS'"
+        ).fetchone()
+    assert state is not None
+    assert state["status"] == "error"
+    assert state["last_success_at"] is None
+
+def test_epss_import_truncated_gzip_records_error_and_preserves_last_success(
+    tmp_path: Path,
+) -> None:
+    db = init_db(tmp_path / "local.sqlite3")
+    prior_success = "2025-01-02T03:04:05+00:00"
+
+    with connect(db) as conn:
+        conn.execute(
+            "INSERT INTO source_sync(source,last_success_at,last_attempt_at,records_seen,status,details) "
+            "VALUES('FIRST EPSS',?,?,?,?,?)",
+            (prior_success, prior_success, 27, "success", "prior-good-import"),
+        )
+
+    source = tmp_path / "epss-truncated.csv.gz"
+    compressed = gzip.compress(
+        b"cve,epss,percentile\nCVE-2099-12346,0.5,0.8\n"
+    )
+    source.write_bytes(compressed[:-4])
+
+    with pytest.raises(ValueError, match="Could not read EPSS CSV"):
+        import_epss_csv(source, db)
+
+    with connect(db) as conn:
+        state = conn.execute(
+            "SELECT last_success_at,last_attempt_at,records_seen,status,details "
+            "FROM source_sync WHERE source='FIRST EPSS'"
+        ).fetchone()
+        imported = conn.execute(
+            "SELECT 1 FROM vulnerabilities WHERE cve_id='CVE-2099-12346'"
+        ).fetchone()
+
+    assert state["last_success_at"] == prior_success
+    assert state["records_seen"] == 27
+    assert state["status"] == "error"
+    assert state["last_attempt_at"] != prior_success
+    assert "truncated" in state["details"].lower() or "end-of-stream" in state["details"].lower()
+    assert imported is None
+
+def test_nvd_truncated_import_records_error_and_preserves_prior_state(
+    tmp_path: Path,
+) -> None:
+    db = init_db(tmp_path / "local.sqlite3")
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text(
+        json.dumps({"vulnerabilities": [_nvd_record("CVE-2099-12340")]}),
+        encoding="utf-8",
+    )
+    assert import_nvd_json(baseline, db) == 1
+
+    prior_success = "2025-01-02T03:04:05+00:00"
+    with connect(db) as conn:
+        conn.execute(
+            "UPDATE source_sync SET last_success_at=?,last_attempt_at=?,"
+            "records_seen=41,status='success',details='prior-good-import' WHERE source='NVD'",
+            (prior_success, prior_success),
+        )
+
+    source = tmp_path / "nvd-truncated.json"
+    source.write_text(
+        '{"vulnerabilities":['
+        + json.dumps(_nvd_record("CVE-2099-12345"))
+        + ",",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError):
+        import_nvd_json(source, db)
+
+    assert get_cve("CVE-2099-12340", db) is not None
+    assert get_cve("CVE-2099-12345", db) is None
+    with connect(db) as conn:
+        state = conn.execute(
+            "SELECT last_success_at,last_attempt_at,records_seen,status,details "
+            "FROM source_sync WHERE source='NVD'"
+        ).fetchone()
+
+    assert state["last_success_at"] == prior_success
+    assert state["records_seen"] == 41
+    assert state["status"] == "error"
+    assert state["last_attempt_at"] != prior_success
+
+
+def test_kev_invalid_json_records_error_and_preserves_prior_state(
+    tmp_path: Path,
+) -> None:
+    db = init_db(tmp_path / "local.sqlite3")
+    prior_success = "2025-01-02T03:04:05+00:00"
+
+    with connect(db) as conn:
+        conn.execute(
+            "INSERT INTO source_sync(source,last_success_at,last_attempt_at,records_seen,status,details) "
+            "VALUES('CISA KEV',?,?,?,?,?)",
+            (prior_success, prior_success, 17, "success", "prior-good-import"),
+        )
+
+    source = tmp_path / "kev-truncated.json"
+    source.write_text('{"vulnerabilities":', encoding="utf-8")
+
+    with pytest.raises(ValueError):
+        import_kev_json(source, db)
+
+    with connect(db) as conn:
+        state = conn.execute(
+            "SELECT last_success_at,last_attempt_at,records_seen,status,details "
+            "FROM source_sync WHERE source='CISA KEV'"
+        ).fetchone()
+
+    assert state["last_success_at"] == prior_success
+    assert state["records_seen"] == 17
+    assert state["status"] == "error"
+    assert state["last_attempt_at"] != prior_success
+
+def test_annual_feed_invalid_metadata_preserves_previous_metadata_cache(
+    tmp_path: Path,
+) -> None:
+    db = init_db(tmp_path / "local.sqlite3")
+    year = 2025
+    cache = tmp_path / "cache"
+    cache.mkdir()
+
+    feed_path = cache / f"nvdcve-2.0-{year}.json.gz"
+    meta_path = cache / f"nvdcve-2.0-{year}.meta"
+    previous_plain = json.dumps({"vulnerabilities": []}).encode()
+    previous_feed = gzip.compress(previous_plain)
+    previous_sha = hashlib.sha256(previous_plain).hexdigest()
+    previous_meta = f"sha256:{previous_sha}\n".encode()
+
+    feed_path.write_bytes(previous_feed)
+    meta_path.write_bytes(previous_meta)
+
+    prior_success = "2025-03-04T05:06:07+00:00"
+    with connect(db) as conn:
+        conn.execute(
+            "INSERT INTO source_sync(source,last_success_at,last_attempt_at,records_seen,status,details) "
+            "VALUES(?,?,?,?,?,?)",
+            (
+                f"NVD yearly {year}",
+                prior_success,
+                prior_success,
+                7,
+                "success",
+                f"year={year}; sha256={previous_sha}",
+            ),
+        )
+
+    def fake_download(url, destination, timeout=60, max_bytes=500 * 1024 * 1024):
+        target = Path(destination)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if url.endswith(".meta"):
+            target.write_bytes(b"metadata without a valid SHA-256\n")
+        else:
+            target.write_bytes(gzip.compress(b'{"vulnerabilities":[]}'))
+        return target
+
+    with patch("cvevident.sources.download", side_effect=fake_download):
+        with pytest.raises(RuntimeError, match="SHA-256"):
+            sync_nvd_year(year, db, cache)
+
+    assert meta_path.read_bytes() == previous_meta
+    assert feed_path.read_bytes() == previous_feed
+
+    with connect(db) as conn:
+        state = conn.execute(
+            "SELECT last_success_at,records_seen,status "
+            "FROM source_sync WHERE source=?",
+            (f"NVD yearly {year}",),
+        ).fetchone()
+
+    assert state["last_success_at"] == prior_success
+    assert state["records_seen"] == 7
+    assert state["status"] == "error"
+
+
+def test_epss_partial_import_preserves_previous_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = init_db(tmp_path / "local.sqlite3")
+    destination = tmp_path / "epss_scores-current.csv.gz"
+    previous_cache = gzip.compress(
+        b"cve,epss,percentile\nCVE-2099-12345,0.4,0.9\n"
+    )
+    destination.write_bytes(previous_cache)
+
+    incoming = gzip.compress(
+        b"cve,epss,percentile\n"
+        b"CVE-2099-12346,0.5,0.8\n"
+        b"CVE-2099-12347,2.0,0.7\n"
+    )
+
+    def fake_download(_url, target, **_kwargs):
+        target = Path(target)
+        target.write_bytes(incoming)
+        return target
+
+    monkeypatch.setattr(sources, "download", fake_download)
+
+    assert sources.sync_epss(db_path=db, destination=destination) == 1
+
+    assert destination.read_bytes() == previous_cache
+    assert get_cve("CVE-2099-12346", db) is not None
+    assert get_cve("CVE-2099-12347", db) is None
+
+    with connect(db) as conn:
+        state = conn.execute(
+            "SELECT last_success_at,records_seen,status,details "
+            "FROM source_sync WHERE source='FIRST EPSS'"
+        ).fetchone()
+
+    assert state["status"] == "partial"
+    assert state["last_success_at"] is None
+    assert state["records_seen"] == 0
+    assert "skipped_invalid_rows=1" in state["details"]
+    assert not list(tmp_path.glob(".*.download.gz"))
+
+def test_annual_feed_partial_import_preserves_previous_cache_and_success_state(
+    tmp_path: Path,
+) -> None:
+    db = init_db(tmp_path / "local.sqlite3")
+    year = 2025
+    cache = tmp_path / "cache"
+    cache.mkdir()
+
+    feed_path = cache / f"nvdcve-2.0-{year}.json.gz"
+    meta_path = cache / f"nvdcve-2.0-{year}.meta"
+
+    previous_plain = json.dumps({"vulnerabilities": []}).encode()
+    previous_feed = gzip.compress(previous_plain)
+    previous_sha = hashlib.sha256(previous_plain).hexdigest()
+    previous_meta = f"sha256:{previous_sha}\n".encode()
+
+    feed_path.write_bytes(previous_feed)
+    meta_path.write_bytes(previous_meta)
+
+    prior_success = "2025-03-04T05:06:07+00:00"
+    source_key = f"NVD yearly {year}"
+
+    with connect(db) as conn:
+        conn.execute(
+            "INSERT INTO source_sync(source,last_success_at,last_attempt_at,records_seen,status,details) "
+            "VALUES('NVD',?,?,?,?,?)",
+            (prior_success, prior_success, 41, "success", "prior-good-import"),
+        )
+        conn.execute(
+            "INSERT INTO source_sync(source,last_success_at,last_attempt_at,records_seen,status,details) "
+            "VALUES(?,?,?,?,?,?)",
+            (source_key, prior_success, prior_success, 7, "success", "prior-yearly-import"),
+        )
+
+    incoming_plain = json.dumps({
+        "vulnerabilities": [
+            _nvd_record("CVE-2099-12348"),
+            None,
+        ]
+    }).encode()
+    incoming_sha = hashlib.sha256(incoming_plain).hexdigest()
+
+    def fake_download(url, destination, timeout=60, max_bytes=500 * 1024 * 1024):
+        target = Path(destination)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if url.endswith(".meta"):
+            target.write_text(f"sha256:{incoming_sha}\n", encoding="utf-8")
+        else:
+            target.write_bytes(gzip.compress(incoming_plain))
+        return target
+
+    with patch("cvevident.sources.download", side_effect=fake_download):
+        result = sync_nvd_year(year, db, cache, force_download=True)
+
+    assert result["status"] == "partial"
+    assert result["records_imported"] == 1
+
+    # The valid row may be stored, but the annual cache and success snapshot
+    # must not be promoted when the input had skipped records.
+    assert get_cve("CVE-2099-12348", db) is not None
+    assert feed_path.read_bytes() == previous_feed
+    assert meta_path.read_bytes() == previous_meta
+
+    with connect(db) as conn:
+        nvd_state = conn.execute(
+            "SELECT last_success_at,records_seen,status,details "
+            "FROM source_sync WHERE source='NVD'"
+        ).fetchone()
+        annual_state = conn.execute(
+            "SELECT last_success_at,records_seen,status,details "
+            "FROM source_sync WHERE source=?",
+            (source_key,),
+        ).fetchone()
+
+    assert nvd_state["last_success_at"] == prior_success
+    assert nvd_state["records_seen"] == 41
+    assert nvd_state["status"] == "partial"
+    assert "skipped_invalid_records=1" in nvd_state["details"]
+
+    assert annual_state["last_success_at"] == prior_success
+    assert annual_state["records_seen"] == 7
+    assert annual_state["status"] == "partial"
+    assert "partial" in annual_state["details"].lower()
+
+    assert not list(cache.glob("*.download.gz"))
+    assert not list(cache.glob("*.download.meta"))

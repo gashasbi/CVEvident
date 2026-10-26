@@ -195,3 +195,23 @@ def test_sync_nvd_years_rejects_invalid_range_before_any_sync(monkeypatch: pytes
     monkeypatch.setattr(sources, "sync_nvd_year", lambda *_args, **_kwargs: pytest.fail("sync must not run"))
     with pytest.raises(ValueError, match="year range must satisfy"):
         sources.sync_nvd_years(2025, 2024)
+
+def test_request_json_retries_short_content_length_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = b'{"vulnerabilities": [], "totalResults": 0}'
+    attempts = []
+    sleeps = []
+
+    def fake_urlopen(_request, timeout):
+        attempts.append(timeout)
+        return _Response(body, {"Content-Length": str(len(body) + 5)})
+
+    monkeypatch.setattr(sources.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(sources.time, "sleep", sleeps.append)
+
+    with pytest.raises(RuntimeError, match="incomplete"):
+        sources._request_json("https://nvd.example.test/api")
+
+    assert len(attempts) == 4
+    assert sleeps == [1, 2, 4]

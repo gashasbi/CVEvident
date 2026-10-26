@@ -63,12 +63,18 @@ def test_nvd_import_skips_invalid_records_and_filters_references_and_weaknesses(
         vulnerability = conn.execute("SELECT description FROM vulnerabilities WHERE cve_id='CVE-2099-12345'").fetchone()
         references = conn.execute("SELECT url,name FROM vulnerability_references").fetchall()
         weaknesses = conn.execute("SELECT cwe_id FROM vulnerability_weaknesses").fetchall()
-        source = conn.execute("SELECT records_seen,status FROM source_sync WHERE source='NVD'").fetchone()
+        source = conn.execute(
+            "SELECT records_seen,status,details,last_success_at "
+            "FROM source_sync WHERE source='NVD'"
+        ).fetchone()
 
     assert vulnerability["description"] == "Valid record"
     assert [tuple(row) for row in references] == [("https://example.test/advisory", "fixture")]
     assert [row["cwe_id"] for row in weaknesses] == ["CWE-787"]
-    assert (source["records_seen"], source["status"]) == (1, "success")
+    assert (source["records_seen"], source["status"]) == (0, "partial")
+    assert source["last_success_at"] is None
+    assert "valid_records=1" in source["details"]
+    assert "skipped_invalid_records=3" in source["details"]
 
 
 @pytest.mark.parametrize(

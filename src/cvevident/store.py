@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import csv
 import gzip
+import zlib
 import json
 import re
 import sqlite3
@@ -203,6 +204,20 @@ def _update_source_sync(
         )
 
 
+def _record_source_import_failure(
+    db_path: str | Path | None, source: str, message: str
+) -> None:
+    """Record a failed import without replacing the last successful snapshot."""
+    try:
+        with connect(db_path) as conn:
+            _update_source_sync(
+                conn, source, 0, str(message)[:1000], status="error"
+            )
+    except sqlite3.Error:
+        # Preserve the original import exception if the database is unavailable.
+        pass
+
+
 def _iter_nvd_items(source_path: Path) -> Iterable[dict[str, Any]]:
     """Yield NVD records, using optional ijson for memory-efficient bulk imports."""
     opener = gzip.open if source_path.suffix.lower() == ".gz" else open
@@ -260,18 +275,24 @@ def import_nvd_json(path: str | Path, db_path: str | Path | None = None) -> int:
     """
     source_path = Path(path).expanduser()
     if not source_path.is_file():
-        raise FileNotFoundError(f"NVD import file not found: {source_path}")
+        message = f"NVD import file not found: {source_path}"
+        _record_source_import_failure(db_path, "NVD", message)
+        raise FileNotFoundError(message)
     count = 0
+    skipped_invalid_records = 0
     try:
         with connect(db_path) as conn:
             for record_index, item in enumerate(_iter_nvd_items(source_path), start=1):
                 if not isinstance(item, dict):
+                    skipped_invalid_records += 1
                     continue
                 cve = item.get("cve", item)
                 if not isinstance(cve, dict):
+                    skipped_invalid_records += 1
                     continue
                 cve_id = cve.get("id")
                 if not isinstance(cve_id, str) or not CVE_RE.fullmatch(cve_id):
+                    skipped_invalid_records += 1
                     continue
                 cve_id = cve_id.upper()
                 score, severity, _vector = _cvss(cve)
@@ -315,24 +336,43 @@ def import_nvd_json(path: str | Path, db_path: str | Path | None = None) -> int:
                              int(product_row["vulnerable"])),
                         )
                 count += 1
-            _update_source_sync(conn, "NVD", count, f"Imported {source_path.name}")
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ValueError(f"Could not read NVD JSON from {source_path}: {exc}") from exc
+            details = (
+                f"Imported {source_path.name}; valid_records={count}; "
+                f"skipped_invalid_records={skipped_invalid_records}"
+            )
+            _update_source_sync(
+                conn, "NVD", count, details,
+                status="partial" if skipped_invalid_records else "success",
+            )
+    except (OSError, json.JSONDecodeError, EOFError, gzip.BadGzipFile, zlib.error) as exc:
+        message = f"Could not read NVD JSON from {source_path}: {exc}"
+        _record_source_import_failure(db_path, "NVD", message)
+        raise ValueError(message) from exc
+    except Exception as exc:
+        # The transaction context has rolled back before this separate status write.
+        _record_source_import_failure(db_path, "NVD", str(exc))
+        raise
     return count
 
 
 def import_kev_json(path: str | Path, db_path: str | Path | None = None) -> int:
     source_path = Path(path).expanduser()
     if not source_path.is_file():
-        raise FileNotFoundError(f"CISA KEV file not found: {source_path}")
+        message = f"CISA KEV file not found: {source_path}"
+        _record_source_import_failure(db_path, "CISA KEV", message)
+        raise FileNotFoundError(message)
     try:
         with source_path.open("r", encoding="utf-8") as handle:
             payload = json.load(handle)
     except (OSError, json.JSONDecodeError) as exc:
-        raise ValueError(f"Could not read valid CISA KEV JSON from {source_path}: {exc}") from exc
+        message = f"Could not read valid CISA KEV JSON from {source_path}: {exc}"
+        _record_source_import_failure(db_path, "CISA KEV", message)
+        raise ValueError(message) from exc
     rows = payload.get("vulnerabilities") if isinstance(payload, dict) else None
     if not isinstance(rows, list):
-        raise ValueError("Expected CISA KEV JSON with a 'vulnerabilities' array")
+        message = "Expected CISA KEV JSON with a 'vulnerabilities' array"
+        _record_source_import_failure(db_path, "CISA KEV", message)
+        raise ValueError(message)
     validated_rows: list[tuple[dict[str, Any], str]] = []
     skipped_invalid_rows = 0
     for record_index, row in enumerate(rows, start=1):
@@ -345,30 +385,34 @@ def import_kev_json(path: str | Path, db_path: str | Path | None = None) -> int:
             continue
         validated_rows.append((row, cve_id.strip().upper()))
     count = 0
-    with connect(db_path) as conn:
-        for row, cve_id in validated_rows:
-            desc = str(row.get("shortDescription") or row.get("vulnerabilityName") or "")
-            _upsert_vulnerability(conn, cve_id=cve_id, source="CISA KEV", published=None,
-                                  modified=None, description=desc, raw_json=row)
-            conn.execute(
-                "UPDATE vulnerabilities SET cisa_kev=1,kev_date_added=?,kev_notes=?,updated_at=? WHERE cve_id=?",
-                (row.get("dateAdded"), row.get("requiredAction"), utc_now(), cve_id),
-            )
-            notes_url = row.get("notes")
-            if isinstance(notes_url, str) and notes_url.startswith(("https://", "http://")):
+    try:
+        with connect(db_path) as conn:
+            for row, cve_id in validated_rows:
+                desc = str(row.get("shortDescription") or row.get("vulnerabilityName") or "")
+                _upsert_vulnerability(conn, cve_id=cve_id, source="CISA KEV", published=None,
+                                      modified=None, description=desc, raw_json=row)
                 conn.execute(
-                    "INSERT OR IGNORE INTO vulnerability_references(cve_id,url,name,tags_json) VALUES(?,?,?,?)",
-                    (cve_id, notes_url, "CISA KEV notes", "[]"),
+                    "UPDATE vulnerabilities SET cisa_kev=1,kev_date_added=?,kev_notes=?,updated_at=? WHERE cve_id=?",
+                    (row.get("dateAdded"), row.get("requiredAction"), utc_now(), cve_id),
                 )
-            count += 1
-        details = (
-            f"Imported {source_path.name}; valid_rows={count}; "
-            f"skipped_invalid_rows={skipped_invalid_rows}"
-        )
-        _update_source_sync(
-            conn, "CISA KEV", count, details,
-            status="partial" if skipped_invalid_rows else "success",
-        )
+                notes_url = row.get("notes")
+                if isinstance(notes_url, str) and notes_url.startswith(("https://", "http://")):
+                    conn.execute(
+                        "INSERT OR IGNORE INTO vulnerability_references(cve_id,url,name,tags_json) VALUES(?,?,?,?)",
+                        (cve_id, notes_url, "CISA KEV notes", "[]"),
+                    )
+                count += 1
+            details = (
+                f"Imported {source_path.name}; valid_rows={count}; "
+                f"skipped_invalid_rows={skipped_invalid_rows}"
+            )
+            _update_source_sync(
+                conn, "CISA KEV", count, details,
+                status="partial" if skipped_invalid_rows else "success",
+            )
+    except Exception as exc:
+        _record_source_import_failure(db_path, "CISA KEV", str(exc))
+        raise
     return count
 
 
@@ -382,7 +426,15 @@ def _open_maybe_gzip(path: str | Path):
 def import_epss_csv(path: str | Path, db_path: str | Path | None = None) -> int:
     source_path = Path(path).expanduser()
     if not source_path.is_file():
-        raise FileNotFoundError(f"EPSS CSV file not found: {source_path}")
+        message = f"EPSS CSV file not found: {source_path}"
+        try:
+            with connect(db_path) as failure_conn:
+                _update_source_sync(
+                    failure_conn, "FIRST EPSS", 0, message, status="error"
+                )
+        except sqlite3.Error:
+            pass
+        raise FileNotFoundError(message)
     count = 0
     skipped_invalid_rows = 0
     try:
@@ -421,8 +473,34 @@ def import_epss_csv(path: str | Path, db_path: str | Path | None = None) -> int:
                 conn, "FIRST EPSS", count, details,
                 status="partial" if skipped_invalid_rows else "success",
             )
-    except (OSError, gzip.BadGzipFile) as exc:
-        raise ValueError(f"Could not read EPSS CSV {source_path}: {exc}") from exc
+    except (
+        OSError,
+        EOFError,
+        gzip.BadGzipFile,
+        zlib.error,
+        csv.Error,
+        UnicodeError,
+    ) as exc:
+        message = f"Could not read EPSS CSV {source_path}: {exc}"
+        try:
+            with connect(db_path) as failure_conn:
+                _update_source_sync(
+                    failure_conn, "FIRST EPSS", 0, message, status="error"
+                )
+        except sqlite3.Error:
+            pass
+        raise ValueError(message) from exc
+    except (ValueError, sqlite3.Error) as exc:
+        # The import transaction has rolled back before this handler runs.
+        # Record failure separately while preserving the last successful snapshot.
+        try:
+            with connect(db_path) as failure_conn:
+                _update_source_sync(
+                    failure_conn, "FIRST EPSS", 0, str(exc)[:1000], status="error"
+                )
+        except sqlite3.Error:
+            pass
+        raise
     return count
 
 

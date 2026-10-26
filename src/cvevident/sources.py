@@ -6,6 +6,7 @@ import hashlib
 import http.client
 import json
 import os
+import re
 import sqlite3
 import tempfile
 import time
@@ -94,24 +95,107 @@ def _mark_failure(db_path: str | Path | None, source: str, message: str) -> None
         )
 
 
-def sync_kev(db_path: str | Path | None = None, destination: str | Path | None = None) -> int:
-    path = Path(destination).expanduser() if destination else Path.home() / ".cvevident" / "cache" / "known_exploited_vulnerabilities.json"
+def _publish_source_cache(
+    candidate: Path,
+    target: Path,
+    db_path: str | Path | None,
+    source: str,
+) -> None:
+    """Publish a validated cache without invalidating an already committed import."""
     try:
-        download(KEV_URL, path)
-        return import_kev_json(path, db_path=db_path)
+        candidate.replace(target)
+    except OSError as exc:
+        # Database import has already committed. Record the cache publication issue
+        # as a warning rather than misreporting the committed import as failed.
+        try:
+            with connect(db_path) as conn:
+                row = conn.execute(
+                    "SELECT details FROM source_sync WHERE source=?", (source,)
+                ).fetchone()
+                if row:
+                    details = (row["details"] or "") + (
+                        f"; cache_publication_warning={str(exc)[:300]}"
+                    )
+                    conn.execute(
+                        "UPDATE source_sync SET details=? WHERE source=?",
+                        (details[:1000], source),
+                    )
+        except sqlite3.Error:
+            pass
+
+
+def sync_kev(db_path: str | Path | None = None, destination: str | Path | None = None) -> int:
+    path = (
+        Path(destination).expanduser()
+        if destination
+        else Path.home() / ".cvevident" / "cache" / "known_exploited_vulnerabilities.json"
+    )
+    candidate: Path | None = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        candidate = path.with_name(
+            f".{path.stem}.{os.getpid()}.{time.time_ns()}.download{path.suffix}"
+        )
+        download(KEV_URL, candidate)
+        count = import_kev_json(candidate, db_path=db_path)
+
+        # Do not promote a cache whose rows were only partially imported.
+        with connect(db_path) as conn:
+            state = conn.execute(
+                "SELECT status FROM source_sync WHERE source='CISA KEV'"
+            ).fetchone()
+        if state and state["status"] == "partial":
+            candidate.unlink(missing_ok=True)
+            return count
+
+        _publish_source_cache(candidate, path, db_path, "CISA KEV")
+        return count
     except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
         _mark_failure(db_path, "CISA KEV", str(exc))
         raise
+    finally:
+        if candidate is not None:
+            try:
+                candidate.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def sync_epss(db_path: str | Path | None = None, destination: str | Path | None = None) -> int:
-    path = Path(destination).expanduser() if destination else Path.home() / ".cvevident" / "cache" / "epss_scores-current.csv.gz"
+    path = (
+        Path(destination).expanduser()
+        if destination
+        else Path.home() / ".cvevident" / "cache" / "epss_scores-current.csv.gz"
+    )
+    candidate: Path | None = None
     try:
-        download(EPSS_URL, path)
-        return import_epss_csv(path, db_path=db_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        candidate = path.with_name(
+            f".{path.stem}.{os.getpid()}.{time.time_ns()}.download{path.suffix}"
+        )
+        download(EPSS_URL, candidate)
+        count = import_epss_csv(candidate, db_path=db_path)
+
+        # Do not promote a cache whose rows were only partially imported.
+        with connect(db_path) as conn:
+            state = conn.execute(
+                "SELECT status FROM source_sync WHERE source='FIRST EPSS'"
+            ).fetchone()
+        if state and state["status"] == "partial":
+            candidate.unlink(missing_ok=True)
+            return count
+
+        _publish_source_cache(candidate, path, db_path, "FIRST EPSS")
+        return count
     except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
         _mark_failure(db_path, "FIRST EPSS", str(exc))
         raise
+    finally:
+        if candidate is not None:
+            try:
+                candidate.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def _parse_meta(text: str) -> dict[str, str]:
@@ -158,10 +242,14 @@ def sync_nvd_year(year: int, db_path: str | Path | None = None,
     meta_url = f"{NVD_FEED_BASE}/nvdcve-2.0-{year}.meta"
     source_key = f"NVD yearly {year}"
     candidate_path: Path | None = None
+    metadata_candidate: Path | None = None
     try:
         dest_dir.mkdir(parents=True, exist_ok=True)
-        download(meta_url, meta_path, max_bytes=2 * 1024 * 1024)
-        meta_text = meta_path.read_text(encoding="utf-8")
+        metadata_candidate = dest_dir / (
+            f".{meta_path.name}.{os.getpid()}.{time.time_ns()}.download.meta"
+        )
+        download(meta_url, metadata_candidate, max_bytes=2 * 1024 * 1024)
+        meta_text = metadata_candidate.read_text(encoding="utf-8")
         meta = _parse_meta(meta_text)
         expected_sha = meta.get("sha256")
         if not expected_sha or not re_full_sha256(expected_sha):
@@ -175,6 +263,8 @@ def sync_nvd_year(year: int, db_path: str | Path | None = None,
                 now = utc_now()
                 conn.execute("UPDATE source_sync SET last_attempt_at=?,status='success',details=? WHERE source=?",
                              (now, f"year={year}; sha256={expected_sha}; unchanged", source_key))
+            if metadata_candidate is not None:
+                _publish_source_cache(metadata_candidate, meta_path, db_path, source_key)
             return {"year": year, "status": "up_to_date", "records_imported": 0, "feed_sha256": expected_sha}
         cached_valid = False
         if feed_path.is_file() and not force_download:
@@ -200,6 +290,36 @@ def sync_nvd_year(year: int, db_path: str | Path | None = None,
         if actual_sha.lower() != expected_sha.lower():
             raise RuntimeError(f"SHA-256 verification failed for NVD {year} feed: metadata={expected_sha}, actual={actual_sha}")
         count = import_nvd_json(import_path, db_path=db_path)
+
+        # Do not promote a partial record import to a successful annual feed.
+        with connect(db_path) as conn:
+            import_state = conn.execute(
+                "SELECT status,details FROM source_sync WHERE source='NVD'"
+            ).fetchone()
+
+        if import_state is not None and import_state["status"] == "partial":
+            now = utc_now()
+            import_details = str(import_state["details"] or "")[:700]
+            details = (
+                f"year={year}; sha256={expected_sha}; partial_import; "
+                f"{import_details}"
+            )
+            with connect(db_path) as conn:
+                conn.execute(
+                    """INSERT INTO source_sync(source,last_attempt_at,status,details)
+                       VALUES(?,?,?,?)
+                       ON CONFLICT(source) DO UPDATE SET
+                       last_attempt_at=excluded.last_attempt_at,
+                       status='partial',details=excluded.details""",
+                    (source_key, now, "partial", details[:1000]),
+                )
+
+            return {
+                "year": year,
+                "status": "partial",
+                "records_imported": count,
+                "feed_sha256": expected_sha,
+            }
         if candidate_path is not None:
             candidate_path.replace(feed_path)
             candidate_path = None
@@ -211,16 +331,19 @@ def sync_nvd_year(year: int, db_path: str | Path | None = None,
                    last_attempt_at=excluded.last_attempt_at,records_seen=excluded.records_seen,status='success',details=excluded.details""",
                 (source_key, now, now, count, "success", f"year={year}; sha256={expected_sha}"),
             )
+        if metadata_candidate is not None:
+            _publish_source_cache(metadata_candidate, meta_path, db_path, source_key)
         return {"year": year, "status": "imported", "records_imported": count, "feed_sha256": expected_sha}
     except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
         _mark_failure(db_path, source_key, str(exc))
         raise
     finally:
-        if candidate_path is not None:
-            try:
-                candidate_path.unlink(missing_ok=True)
-            except OSError:
-                pass
+        for temporary_path in (candidate_path, metadata_candidate):
+            if temporary_path is not None:
+                try:
+                    temporary_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
 
 def re_full_sha256(value: str) -> bool:
@@ -353,9 +476,15 @@ def sync_nvd_modified(db_path: str | Path | None = None, days: int = 7,
     start_index = 0
     expected_total: int | None = None
     aggregate_path: Path | None = None
+    staging_dir: Path | None = None
+    page_cache_pairs: list[tuple[Path, Path]] = []
+    page_cache_records: list[dict[str, Any]] = []
+    seen_cve_ids: set[str] = set()
+    cache_run_id = time.time_ns()
     try:
         dest_dir = Path(cache_dir).expanduser() if cache_dir else Path.home() / ".cvevident" / "cache" / "nvd-modified"
         dest_dir.mkdir(parents=True, exist_ok=True)
+        staging_dir = Path(tempfile.mkdtemp(prefix="nvd-modified-stage-", dir=dest_dir))
         fd, tmp_name = tempfile.mkstemp(prefix="nvd-modified-aggregate-", suffix=".json", dir=dest_dir)
         aggregate_path = Path(tmp_name)
         with os.fdopen(fd, "w", encoding="utf-8") as aggregate:
@@ -407,18 +536,49 @@ def sync_nvd_modified(db_path: str | Path | None = None, days: int = 7,
                     cve_id = cve.get("id") if isinstance(cve, dict) else None
                     if not isinstance(cve_id, str) or not cve_id.strip():
                         raise RuntimeError(f"NVD API page contains a record without a CVE ID (item {index})")
+                    normalized_cve_id = cve_id.strip().upper()
+                    if not re.fullmatch(r"CVE-\d{4}-\d{4,}", normalized_cve_id):
+                        raise RuntimeError(
+                            f"NVD API page contains an invalid CVE ID {normalized_cve_id!r} (item {index})"
+                        )
+                    if normalized_cve_id in seen_cve_ids:
+                        raise RuntimeError(
+                            f"NVD API returned duplicate CVE ID {normalized_cve_id}; sync aborted"
+                        )
+                    seen_cve_ids.add(normalized_cve_id)
                     if not first_record:
                         aggregate.write(",")
                     json.dump(item, aggregate, ensure_ascii=False, separators=(",", ":"))
                     first_record = False
 
-                batch_path = dest_dir / f"nvd-{start.strftime('%Y%m%d')}-{end.strftime('%Y%m%d')}-{start_index}.json"
-                page_part = batch_path.with_suffix(batch_path.suffix + ".part")
+                if staging_dir is None:
+                    raise RuntimeError("NVD page-cache staging directory was not initialized")
+
+                window_start = start.strftime("%Y%m%dT%H%M%SZ")
+                window_end = end.strftime("%Y%m%dT%H%M%SZ")
+                batch_name = (
+                    f"nvd-modified-{window_start}-{window_end}-rpp{params['resultsPerPage']}"
+                    f"-run{cache_run_id}-start{start_index}.json"
+                )
+                batch_path = dest_dir / batch_name
+                staged_batch_path = staging_dir / batch_name
+                page_part = staged_batch_path.with_suffix(staged_batch_path.suffix + ".part")
+                serialized_payload = json.dumps(payload, ensure_ascii=False)
                 try:
-                    page_part.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-                    page_part.replace(batch_path)
+                    page_part.write_text(serialized_payload, encoding="utf-8")
+                    page_part.replace(staged_batch_path)
                 finally:
                     page_part.unlink(missing_ok=True)
+
+                page_cache_pairs.append((staged_batch_path, batch_path))
+                page_cache_records.append({
+                    "file": batch_name,
+                    "startIndex": page_start,
+                    "resultsPerPage": page_size,
+                    "totalResults": page_total,
+                    "record_count": actual_count,
+                    "sha256": hashlib.sha256(serialized_payload.encode("utf-8")).hexdigest(),
+                })
 
                 if start_index + actual_count >= page_total:
                     break
@@ -436,6 +596,76 @@ def sync_nvd_modified(db_path: str | Path | None = None, days: int = 7,
         # import_nvd_json wraps its writes in one SQLite transaction. No page is
         # imported until pagination and every response have passed validation.
         total_imported = import_nvd_json(aggregate_path, db_path=db_path)
+
+        # The manifest is published last and marks a complete cache run.
+        # Never publish page files from a run whose pagination/import failed.
+        if staging_dir is not None:
+            manifest_name = f"nvd-modified-run-{cache_run_id}.meta"
+            staged_manifest = staging_dir / manifest_name
+            final_manifest = dest_dir / manifest_name
+            manifest = {
+                "schema_version": 1,
+                "source": "NVD",
+                "status": "imported",
+                "run_id": cache_run_id,
+                "request": {
+                    "endpoint": NVD_URL,
+                    "lastModStartDate": params["lastModStartDate"],
+                    "lastModEndDate": params["lastModEndDate"],
+                    "resultsPerPage": int(params["resultsPerPage"]),
+                },
+                "validation": {
+                    "state": "complete",
+                    "pagination_total_consistent": True,
+                    "unique_cve_ids": True,
+                    "totalResults": expected_total,
+                    "records_received": len(seen_cve_ids),
+                },
+                "database_import": {
+                    "state": "success",
+                    "records_imported": total_imported,
+                },
+                "pages": page_cache_records,
+            }
+
+            published_paths: list[Path] = []
+            try:
+                staged_manifest.write_text(
+                    json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+                for staged_path, final_path in page_cache_pairs:
+                    staged_path.replace(final_path)
+                    published_paths.append(final_path)
+
+                # Publish this commit marker only after all page files exist.
+                staged_manifest.replace(final_manifest)
+                published_paths.append(final_manifest)
+            except OSError as cache_exc:
+                for published_path in published_paths:
+                    try:
+                        published_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+
+                # DB import has already committed. A cache-only failure must not
+                # report the successful DB import as a failed synchronization.
+                try:
+                    with connect(db_path) as conn:
+                        state = conn.execute(
+                            "SELECT details FROM source_sync WHERE source='NVD'"
+                        ).fetchone()
+                        if state:
+                            details = (state["details"] or "") + (
+                                f"; cache_publication_warning={str(cache_exc)[:300]}"
+                            )
+                            conn.execute(
+                                "UPDATE source_sync SET details=? WHERE source='NVD'",
+                                (details[:1000],),
+                            )
+                except sqlite3.Error:
+                    pass
+
         return total_imported
     except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
         _mark_failure(db_path, "NVD", str(exc))
@@ -444,5 +674,15 @@ def sync_nvd_modified(db_path: str | Path | None = None, days: int = 7,
         if aggregate_path is not None:
             try:
                 aggregate_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        if staging_dir is not None:
+            try:
+                for staged_path in staging_dir.iterdir():
+                    try:
+                        staged_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                staging_dir.rmdir()
             except OSError:
                 pass
