@@ -155,6 +155,30 @@ def test_cli_converts_database_initialization_errors_to_exit_code_two(
     assert "error: schema unavailable" in captured.err
 
 
+def test_cli_show_analysis_rebuilds_saved_report_from_database(
+    capsys: pytest.CaptureFixture[str], db_path: Path, tmp_path: Path
+) -> None:
+    source = tmp_path / "roundtrip.rtf"
+    source.write_bytes(b"{\\rtf1\\ansi report roundtrip fixture}")
+
+    assert cli.main([
+        "--db", str(db_path), "analyze", str(source), "--format", "json"
+    ]) == 0
+    original = json.loads(capsys.readouterr().out)
+    analysis_id = original["analysis_id"]
+
+    assert cli.main([
+        "--db", str(db_path), "show-analysis", str(analysis_id), "--format", "json"
+    ]) == 0
+    rebuilt = json.loads(capsys.readouterr().out)
+
+    assert rebuilt["analysis_id"] == analysis_id
+    assert rebuilt["file"]["sha256"] == original["file"]["sha256"]
+    assert rebuilt["file"]["filename"] == original["file"]["filename"]
+    assert rebuilt["warnings"] == original["warnings"]
+    assert rebuilt["evidence"] == original["evidence"]
+
+
 def test_cli_show_analysis_renders_found_report_to_requested_format(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], db_path: Path
 ) -> None:
