@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import io
+import os
 import struct
+import subprocess
+import sys
 import tempfile
 import unittest
 import zipfile
@@ -230,6 +233,40 @@ class DispatchFailureMatrixTests(unittest.TestCase):
             with self.subTest(filename=filename):
                 with self.assertRaises(FileNotFoundError):
                     analyze_file(self.root / filename, db_path=self.db)
+
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "requires POSIX FIFO support")
+    def test_analyze_file_rejects_fifo_without_blocking(self):
+        fifo_path = self.root / "input.pdf"
+        os.mkfifo(fifo_path)
+
+        probe = "\n".join((
+            "import sys",
+            "from cvevident.analyzer import analyze_file",
+            "try:",
+            "    analyze_file(sys.argv[1], db_path=sys.argv[2])",
+            "except FileNotFoundError:",
+            "    raise SystemExit(0)",
+            "raise SystemExit(3)",
+        ))
+        try:
+            result = subprocess.run(
+                [sys.executable, "-c", probe, str(fifo_path), str(self.db)],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            self.fail(
+                "analyze_file blocked while probing a FIFO before bounded input validation"
+            )
+
+        self.assertEqual(
+            result.returncode,
+            0,
+            msg=f"stdout={result.stdout!r}; stderr={result.stderr!r}",
+        )
 
 
 if __name__ == "__main__":

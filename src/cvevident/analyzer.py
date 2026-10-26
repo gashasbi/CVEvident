@@ -10,6 +10,7 @@ from . import __version__
 from .db import connect
 from .evidence_engine import build_cve_associations, build_product_context, evidence_summary
 from .evidence_trace import append_product_context_evidence, append_reported_source_evidence, finalize_evidence_traceability
+from .file_input import read_prefix
 from .pdf_triage import analyze_pdf
 from .office_triage import LEGACY_OFFICE_EXTENSIONS, OFFICE_EXTENSIONS, analyze_office
 from .legacy_office_triage import OLE_SIGNATURE, analyze_legacy_office
@@ -29,10 +30,8 @@ def analyze_file(path: str | Path, db_path: str | Path | None = None,
     input_path = Path(path).expanduser()
     suffix = input_path.suffix.lower()
     try:
-        with input_path.open("rb") as handle:
-            prefix = handle.read(1024)
+        prefix = read_prefix(input_path, 1024)
     except OSError:
-        # Let the selected analyzer provide the established missing/unreadable-file error.
         prefix = b""
 
     # Select a parser using content signatures first and suffixes only as a fallback.
