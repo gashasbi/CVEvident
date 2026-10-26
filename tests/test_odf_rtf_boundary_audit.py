@@ -327,3 +327,42 @@ class TestRtfScannerBoundaryCases:
 
         assert result["negative_group_balance"] is True
         assert result["group_balance"] is None
+
+def test_rtf_counting_and_examples_avoid_materializing_matches(monkeypatch):
+    import re
+    from cvevident import rtf_triage
+
+    class IterOnlyPattern:
+        def __init__(self, expression):
+            self.compiled = re.compile(expression)
+
+        def findall(self, *_args, **_kwargs):
+            raise AssertionError("RTF counting must not materialize all matches")
+
+        def finditer(self, data):
+            return self.compiled.finditer(data)
+
+    monkeypatch.setattr(
+        rtf_triage,
+        "_FIELD_RISK_WORDS",
+        IterOnlyPattern(rtf_triage._FIELD_RISK_WORDS.pattern),
+    )
+    monkeypatch.setattr(
+        rtf_triage,
+        "_URL_LITERAL",
+        IterOnlyPattern(rtf_triage._URL_LITERAL.pattern),
+    )
+
+    def reject_split(*_args, **_kwargs):
+        raise AssertionError("RTF example sampling must not materialize all segments")
+
+    monkeypatch.setattr(rtf_triage.re, "split", reject_split)
+
+    payload = b"DDE\nhttps://example.invalid\n" * 20
+    data = b'{\\rtf1{\\field{\\*\\fldinst ' + payload + b'}}}'
+
+    result = rtf_triage._scan_rtf(data)
+
+    assert result["field_instruction_indicator_count"] == 20
+    assert result["external_target_count"] == 20
+    assert len(result["field_instruction_examples"]) <= 10

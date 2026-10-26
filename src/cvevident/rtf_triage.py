@@ -163,16 +163,30 @@ def _scan_rtf(data: bytes) -> dict[str, Any]:
             break
 
     field_instructions = bytes(field_text)
-    risk_words = _FIELD_RISK_WORDS.findall(field_instructions)
-    urls = _URL_LITERAL.findall(field_instructions)
+    risk_word_count = sum(1 for _ in _FIELD_RISK_WORDS.finditer(field_instructions))
+    url_count = sum(1 for _ in _URL_LITERAL.finditer(field_instructions))
+    field_examples: list[str] = []
+    segment_start = 0
+    for separator in re.finditer(rb"[\r\n\x00]+", field_instructions):
+        segment = field_instructions[segment_start:separator.start()]
+        segment_start = separator.end()
+        if segment.strip():
+            field_examples.append(
+                _safe_text(segment.decode("latin-1", errors="replace"), 240)
+            )
+            if len(field_examples) >= 10:
+                break
+    else:
+        segment = field_instructions[segment_start:]
+        if segment.strip() and len(field_examples) < 10:
+            field_examples.append(
+                _safe_text(segment.decode("latin-1", errors="replace"), 240)
+            )
     return {
         "control_counts": dict(controls),
-        "field_instruction_examples": [
-            _safe_text(item.decode("latin-1", errors="replace"), 240)
-            for item in re.split(rb"[\r\n\x00]+", field_instructions) if item.strip()
-        ][:10],
-        "field_instruction_indicator_count": len(risk_words),
-        "external_target_count": len(urls),
+        "field_instruction_examples": field_examples,
+        "field_instruction_indicator_count": risk_word_count,
+        "external_target_count": url_count,
         "group_balance": None if negative_balance else depth,
         "maximum_group_depth": max_depth,
         "negative_group_balance": negative_balance,
