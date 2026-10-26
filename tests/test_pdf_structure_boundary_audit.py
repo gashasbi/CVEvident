@@ -15,6 +15,7 @@ from pypdf.generic import (
 
 from cvevident import pdf_structure
 from cvevident.pdf_structure import analyze_pdf_structure
+from cvevident.pdf_triage import analyze_pdf
 
 
 def install_fake_reader(monkeypatch, trailer, *, encrypted=False):
@@ -174,6 +175,38 @@ def test_unreadable_javascript_name_tree_is_reported_as_incomplete(
     assert any(
         "incomplete" in warning.lower()
         for warning in result["warnings"]
+    )
+
+
+def test_failed_pdf_traversal_discards_partial_structural_feature_evidence(
+    monkeypatch, tmp_path
+):
+    from cvevident.pdf_triage import analyze_pdf
+
+    class FailingDictionary(DictionaryObject):
+        def items(self):
+            raise RuntimeError("synthetic traversal failure")
+
+    root = FailingDictionary()
+    root[NameObject("/OpenAction")] = DictionaryObject({
+        NameObject("/S"): NameObject("/JavaScript")
+    })
+    trailer = DictionaryObject()
+    trailer[NameObject("/Root")] = root
+    install_fake_reader(monkeypatch, trailer)
+
+    path = tmp_path / "partial-failure.pdf"
+    path.write_bytes(b"%PDF-1.7\\n")
+    report = analyze_pdf(path)
+    analysis = report["structural_analysis"]
+
+    assert analysis["status"] == "failed"
+    assert analysis["findings"] == []
+    assert analysis["features"]["catalog_open_action_present"] is False
+    assert analysis["features"]["open_action_entries"] == 0
+    assert not any(
+        item.get("key") == "pdf.structure.catalog_open_action_present"
+        for item in report["evidence"]
     )
 
 

@@ -583,6 +583,10 @@ def analyze_pdf_structure(data: bytes, is_pdf: bool) -> dict[str, Any]:
         # when the parser failed. Lexical observations remain available in pdf_triage.
         result["findings"] = []
         result["findings_truncated"] = False
+        result["features"] = _base_result(
+            "failed", result.get("parser_version")
+        )["features"]
+        result["page_count_declared"] = None
         result["warnings"].append(
             f"The structural PDF parser could not complete ({type(exc).__name__}); lexical observations are retained, not treated as a structural finding."
         )
