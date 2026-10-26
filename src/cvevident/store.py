@@ -810,6 +810,34 @@ def search_product_cves(
                     else "name_match_version_context_not_conclusive"
                 ),
                 "assessment": "product_context_candidate_not_file_attribution",
+                "ranking_explanation": {
+                    "name_match_class": name_context["name_match_class"],
+                    "matching_vendor_terms": name_context["matching_vendor_terms"],
+                    "matching_product_terms": name_context["matching_product_terms"],
+                    "version_match_status": version_context["status"],
+                    "product_relevance_score": score,
+                    "cisa_kev": bool(row["cisa_kev"]),
+                    "epss_score": row["epss_score"],
+                    "ordered_by": (
+                        ["name_match_class_desc"]
+                        + (["version_match_status_rank_desc"] if target_version else [])
+                        + [
+                            "product_relevance_score_desc",
+                            "cisa_kev_true_first",
+                            "epss_score_desc",
+                            "cve_id_asc",
+                        ]
+                    ),
+                    "score_semantics": "lexical_retrieval_relevance_not_probability",
+                    "interpretation": "The ranking reflects retrieval relevance and context signals, not vulnerability probability or proof that a file is affected.",
+                },
+                "applicability_context": {
+                    "nvd_cpe_vulnerable_flag": bool(row["cpe_vulnerable"]),
+                    "nested_configuration_evaluated": False,
+                    "file_product_presence_established": False,
+                    "file_vulnerability_established": False,
+                    "interpretation": "NVD marks this CPE match as vulnerable, but this search does not evaluate the complete nested configuration or platform conditions and does not establish product presence in a file or file vulnerability.",
+                },
             }
             product_row = {key: row.get(key) for key in row_identity_key}
             product_row.update({

@@ -234,6 +234,39 @@ class ProductMatchingTests(unittest.TestCase):
         self.assertEqual(signals["CISA KEV"]["state"], "unknown_no_successful_local_kev_import")
         self.assertEqual(signals["FIRST EPSS"]["state"], "unknown_no_successful_local_epss_import")
 
+    def test_product_context_explains_ranking_signals_and_order(self):
+        self.import_payload(
+            "ranking-explanation.json",
+            self.nvd_payload(vendor="apache", product="log4j", criteria_version="*"),
+        )
+        result = search_product_cves("apache log4j", self.db)[0]
+        explanation = result["ranking_explanation"]
+        self.assertEqual(explanation["name_match_class"], result["name_match_class"])
+        self.assertEqual(explanation["matching_vendor_terms"], result["matching_vendor_terms"])
+        self.assertEqual(explanation["matching_product_terms"], result["matching_product_terms"])
+        self.assertEqual(explanation["product_relevance_score"], result["product_relevance_score"])
+        self.assertEqual(
+            explanation["ordered_by"],
+            ["name_match_class_desc", "product_relevance_score_desc",
+             "cisa_kev_true_first", "epss_score_desc", "cve_id_asc"],
+        )
+        self.assertIn("retrieval relevance", explanation["interpretation"])
+
+    def test_applicability_context_separates_nvd_flag_from_file_vulnerability(self):
+        self.import_payload(
+            "applicability-context.json",
+            self.nvd_payload(vendor="apache", product="log4j", criteria_version="*"),
+        )
+        result = search_product_cves("apache log4j", self.db)[0]
+        context = result["applicability_context"]
+        self.assertTrue(context["nvd_cpe_vulnerable_flag"])
+        self.assertFalse(context["nested_configuration_evaluated"])
+        self.assertFalse(context["file_vulnerability_established"])
+        self.assertEqual(
+            result["assessment"],
+            "product_context_candidate_not_file_attribution",
+        )
+
     def test_product_context_carries_query_version_ambiguity_and_freshness(self):
         self.import_payload("range.json", self.nvd_payload(criteria_version="*", start_including="1.0", end_excluding="2.0"))
         context = build_product_context("Apache Log4j 1.5", str(self.db), 10)
