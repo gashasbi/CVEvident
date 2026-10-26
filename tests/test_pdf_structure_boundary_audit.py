@@ -395,3 +395,28 @@ def test_nested_names_dictionary_is_not_catalog_javascript_name_tree(monkeypatch
         finding.get("feature") == "javascript_name_tree"
         for finding in result["findings"]
     )
+
+def test_pdf_lexical_marker_count_respects_name_delimiters():
+    from cvevident.pdf_triage import _count_pdf_name, _find_pdf_name_offsets
+
+    data = (
+        b"/JS /JSExtra /JavaScript /JavaScriptExtra "
+        b"/JavaScript#41 /JS/ /JS%"
+    )
+
+    assert _count_pdf_name(data, b"/JS") == 3
+    assert _count_pdf_name(data, b"/JavaScript") == 1
+
+    js_offsets, js_truncated = _find_pdf_name_offsets(data, b"/JS")
+    javascript_offsets, javascript_truncated = _find_pdf_name_offsets(
+        data, b"/JavaScript"
+    )
+
+    assert js_offsets == [
+        data.index(b"/JS "),
+        data.index(b"/JS/"),
+        data.index(b"/JS%"),
+    ]
+    assert js_truncated is False
+    assert javascript_offsets == [data.index(b"/JavaScript ")]
+    assert javascript_truncated is False
