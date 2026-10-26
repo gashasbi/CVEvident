@@ -98,6 +98,30 @@ class ProductMatchingTests(unittest.TestCase):
         self.assertEqual([row["cve_id"] for row in results], ["CVE-2099-12345"])
         self.assertEqual(results[0]["name_match_class"], "all_query_terms_match")
 
+    def test_search_finds_product_with_escaped_colon_in_cpe_name(self):
+        payload = self.nvd_payload(
+            vendor="acme", product=r"log\:manager", criteria_version="*"
+        )
+        self.import_payload("escaped-product.json", payload)
+
+        results = search_product_cves("log manager", self.db)
+        self.assertEqual([row["cve_id"] for row in results], ["CVE-2099-12345"])
+        self.assertEqual(results[0]["name_match_class"], "all_query_terms_match")
+
+    def test_vendor_only_overlap_remains_context_not_file_attribution(self):
+        self.import_payload(
+            "vendor-only.json",
+            self.nvd_payload(vendor="apache", product="log4j", criteria_version="*"),
+        )
+
+        results = search_product_cves("apache", self.db)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["name_match_class"], "vendor_only_match")
+        self.assertEqual(
+            results[0]["assessment"],
+            "product_context_candidate_not_file_attribution",
+        )
+
     def test_vendor_filter_disambiguates_same_product_name(self):
         payload = {"vulnerabilities": []}
         payload["vulnerabilities"].extend(self.nvd_payload(
