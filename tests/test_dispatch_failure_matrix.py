@@ -195,6 +195,31 @@ class DispatchFailureMatrixTests(unittest.TestCase):
         self.assertEqual(pdf_report["structural_analysis"]["status"], "failed")
         self.assertEqual(pdf_report["assessment"]["verdict"], "not_assessed")
 
+    def test_empty_and_truncated_signatures_fail_cautiously(self):
+        cases = [
+            ("empty.pdf", b"", "structural_analysis", "skipped_not_pdf"),
+            ("empty.docx", b"", "office_analysis", "failed"),
+            ("empty.odt", b"", "odf_analysis", "failed"),
+            ("empty.rtf", b"", "rtf_analysis", "failed"),
+            ("empty.doc", b"", "legacy_office_analysis", "failed"),
+            ("partial-pdf.pdf", b"%PD", "structural_analysis", "skipped_not_pdf"),
+            ("partial-zip.docx", b"PK\\x03", "office_analysis", "failed"),
+            ("partial-zip.odt", b"PK\\x05", "odf_analysis", "failed"),
+            ("partial-rtf.rtf", b"{\\\\rt", "rtf_analysis", "failed"),
+            ("partial-ole.doc", OLE_SIGNATURE[:5], "legacy_office_analysis", "failed"),
+        ]
+        for filename, payload, section, expected_status in cases:
+            with self.subTest(filename=filename, size=len(payload)):
+                report = self._analyze(filename, payload)
+                self.assertIn(section, report)
+                self.assertEqual(report[section]["status"], expected_status)
+                self.assertEqual(report["assessment"]["verdict"], "not_assessed")
+                self.assertFalse(
+                    report["analysis_coverage"]["complete_for_declared_static_scope"]
+                )
+                self.assertTrue(report.get("analysis_id"))
+
+
     def test_failed_ooxml_zip_is_not_silently_reinterpreted_as_odf(self):
         report = self._analyze("corrupt.docx", b"PK\x03\x04" + b"not-a-complete-zip")
         self.assertIn("office_analysis", report)
