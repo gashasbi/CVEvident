@@ -127,10 +127,18 @@ def _with_pdf_resource_limits(function):
             return result
 
         try:
-            return function(data, is_pdf)
+            result = function(data, is_pdf)
         finally:
-            # pypdf's context manager resets its context-local configuration here.
-            context.__exit__(None, None, None)
+            try:
+                context.__exit__(None, None, None)
+            except Exception as exc:
+                result = _base_result("failed", version)
+                result["error_type"] = type(exc).__name__
+                result["warnings"].append(
+                    "PDF structural parsing results were discarded because pypdf resource-limit configuration "
+                    f"could not be restored ({type(exc).__name__})."
+                )
+        return result
 
     return wrapped
 

@@ -114,3 +114,29 @@ def test_pdf_parser_fails_closed_if_limit_setup_raises(
 
     assert result["status"] == "failed"
     assert "could not be applied (RuntimeError)" in " ".join(result["warnings"])
+
+@pytest.mark.skipif(
+    not callable(getattr(pypdf, "apply_configuration", None))
+    or getattr(pypdf, "Configuration", None) is None,
+    reason="test requires the resource-limit Configuration API",
+)
+def test_pdf_parser_fails_closed_if_configuration_cleanup_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class BrokenCleanup:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, exc_type, exc, traceback):
+            raise RuntimeError("configuration cleanup failed")
+
+    monkeypatch.setattr(
+        pypdf,
+        "apply_configuration",
+        lambda **_overrides: BrokenCleanup(),
+    )
+
+    result = pdf_structure.analyze_pdf_structure(_pdf_bytes(), is_pdf=True)
+
+    assert result["status"] == "failed"
+    assert "could not be restored (RuntimeError)" in " ".join(result["warnings"])
