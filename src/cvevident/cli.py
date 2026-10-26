@@ -269,6 +269,30 @@ def _batch_report_filename(index: int, path: Path) -> str:
     return f"{index:04d}-{safe_stem or 'file'}.json"
 
 
+def _report_analysis_failure(report: dict[str, Any]) -> tuple[str, str] | None:
+    for component in (
+        "office_analysis",
+        "odf_analysis",
+        "legacy_office_analysis",
+        "rtf_analysis",
+        "structural_analysis",
+    ):
+        section = report.get(component)
+        if not isinstance(section, dict) or section.get("status") != "failed":
+            continue
+        warnings = section.get("warnings")
+        reason = ""
+        if isinstance(warnings, list):
+            reason = next(
+                (str(value).strip() for value in warnings if str(value).strip()),
+                "",
+            )
+        if not reason:
+            reason = str(section.get("error") or section.get("message") or "")
+        return component, reason or f"{component} reported failed status"
+    return None
+
+
 def _analyze_batch(args: argparse.Namespace, db_path: str | Path) -> dict[str, Any]:
     if args.max_files < 1:
         raise ValueError("--max-files must be positive")
@@ -296,12 +320,21 @@ def _analyze_batch(args: argparse.Namespace, db_path: str | Path) -> dict[str, A
             results.append(_batch_error_result(file_path, "analysis", exc))
             continue
 
+        analysis_failure = _report_analysis_failure(report)
         result: dict[str, Any] = {
             "path": str(file_path),
-            "status": "ok",
+            "status": "error" if analysis_failure else "ok",
+            "analysis_status": "failed" if analysis_failure else "ok",
             "file_type": report.get("file", {}).get("file_type"),
             "sha256": report.get("file", {}).get("sha256"),
         }
+        if analysis_failure:
+            component, reason = analysis_failure
+            result.update({
+                "stage": "analysis",
+                "error_type": "AnalysisFailure",
+                "error": f"{component}: {reason}"[:1000],
+            })
         if report.get("analysis_id") is not None:
             result["analysis_id"] = report["analysis_id"]
 
@@ -315,7 +348,7 @@ def _analyze_batch(args: argparse.Namespace, db_path: str | Path) -> dict[str, A
             except Exception as exc:
                 result.update({
                     "status": "error",
-                    "analysis_status": "ok",
+                    "analysis_status": result.get("analysis_status", "ok"),
                     "stage": "report_write",
                     "error_type": type(exc).__name__,
                     "error": (str(exc).strip() or type(exc).__name__)[:1000],

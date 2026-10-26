@@ -133,6 +133,41 @@ class BatchAnalysisCliTests(unittest.TestCase):
         self.assertEqual(summary["results"][0]["stage"], "analysis")
         self.assertEqual(summary["results"][1]["analysis_id"], 42)
 
+    def test_batch_marks_parser_failure_and_continues_with_other_inputs(self):
+        good = self.write("good.rtf", b"{\\rtf1\\ansi valid fixture}")
+        broken = self.write("broken.docx", b"PK\x03\x04broken")
+        unknown = self.write("unknown.bin", b"unknown file content")
+        reports_dir = self.root / "mixed-reports"
+
+        code, output, _stderr = self.run_batch(
+            str(good), str(broken), str(unknown), str(good),
+            "--reports-dir", str(reports_dir),
+        )
+        summary = json.loads(output)
+        results = {
+            Path(item["path"]).name: item
+            for item in summary["results"]
+            if item.get("path")
+        }
+
+        self.assertEqual(code, 1)
+        self.assertEqual(summary["status"], "partial")
+        self.assertEqual(summary["counts"]["files_discovered"], 3)
+        self.assertEqual(summary["counts"]["files_analyzed"], 2)
+        self.assertEqual(summary["counts"]["files_failed"], 1)
+        self.assertEqual(summary["counts"]["reports_written"], 3)
+        self.assertEqual(summary["counts"]["duplicates_skipped"], 1)
+        self.assertEqual(results["good.rtf"]["status"], "ok")
+        self.assertEqual(results["unknown.bin"]["status"], "ok")
+        self.assertEqual(results["broken.docx"]["status"], "error")
+        self.assertEqual(results["broken.docx"]["stage"], "analysis")
+        self.assertEqual(results["broken.docx"]["analysis_status"], "failed")
+
+        report_path = Path(results["broken.docx"]["report_path"])
+        self.assertTrue(report_path.is_file())
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assertEqual(report["office_analysis"]["status"], "failed")
+
     def test_duplicate_file_paths_are_analyzed_once(self):
         path = self.write("once.rtf", b"{\\rtf1\\ansi once}")
 
