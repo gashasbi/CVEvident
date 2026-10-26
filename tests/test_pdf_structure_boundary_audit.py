@@ -15,6 +15,7 @@ from pypdf.generic import (
 
 from cvevident import pdf_structure
 from cvevident.pdf_structure import analyze_pdf_structure
+from cvevident.pdf_triage import analyze_pdf
 
 
 def install_fake_reader(monkeypatch, trailer, *, encrypted=False):
@@ -177,6 +178,38 @@ def test_unreadable_javascript_name_tree_is_reported_as_incomplete(
     )
 
 
+def test_failed_pdf_traversal_discards_partial_structural_feature_evidence(
+    monkeypatch, tmp_path
+):
+    from cvevident.pdf_triage import analyze_pdf
+
+    class FailingDictionary(DictionaryObject):
+        def items(self):
+            raise RuntimeError("synthetic traversal failure")
+
+    root = FailingDictionary()
+    root[NameObject("/OpenAction")] = DictionaryObject({
+        NameObject("/S"): NameObject("/JavaScript")
+    })
+    trailer = DictionaryObject()
+    trailer[NameObject("/Root")] = root
+    install_fake_reader(monkeypatch, trailer)
+
+    path = tmp_path / "partial-failure.pdf"
+    path.write_bytes(b"%PDF-1.7\\n")
+    report = analyze_pdf(path)
+    analysis = report["structural_analysis"]
+
+    assert analysis["status"] == "failed"
+    assert analysis["findings"] == []
+    assert analysis["features"]["catalog_open_action_present"] is False
+    assert analysis["features"]["open_action_entries"] == 0
+    assert not any(
+        item.get("key") == "pdf.structure.catalog_open_action_present"
+        for item in report["evidence"]
+    )
+
+
 def test_structural_indicators_are_reported_without_executing_actions():
     writer = PdfWriter()
     page = writer.add_blank_page(width=72, height=72)
@@ -243,3 +276,171 @@ def test_structural_indicators_are_reported_without_executing_actions():
         for warning in result["warnings"]
     )
     assert "synthetic-test-code" not in str(result["findings"])
+
+
+def test_pdf_marker_count_does_not_materialize_all_matches(monkeypatch):
+    from cvevident import pdf_triage
+
+    data = b"/JavaScript " * 10000
+
+    def reject_findall(*args, **kwargs):
+        raise AssertionError("marker counting must not materialize every match")
+
+    monkeypatch.setattr(pdf_triage.re, "findall", reject_findall)
+
+    assert pdf_triage._count_pdf_name(data, b"/JavaScript") == 10000
+
+
+def test_pdf_marker_offsets_limit_exact_and_over_limit():
+    from cvevident.pdf_triage import _find_pdf_name_offsets
+
+    marker = b"/JavaScript"
+    data = b"/JavaScript /JavaScript"
+
+    offsets, truncated = _find_pdf_name_offsets(data, marker, limit=2)
+    assert offsets == [0, len(marker) + 1]
+    assert truncated is False
+
+    data += b" /JavaScript"
+    offsets, truncated = _find_pdf_name_offsets(data, marker, limit=2)
+    assert offsets == [0, len(marker) + 1]
+    assert truncated is True
+
+
+def test_pdf_header_offset_boundary_includes_last_allowed_start(tmp_path):
+    last_allowed = tmp_path / "header-at-1023.pdf"
+    last_allowed.write_bytes(b"x" * 1023 + b"%PDF-1.7\\n")
+
+    report = analyze_pdf(last_allowed)
+
+    assert report["metrics"]["pdf_header_found"] is True
+    assert report["metrics"]["pdf_header_offset"] == 1023
+    assert report["file"]["file_type"] == "pdf"
+
+    beyond_limit = tmp_path / "header-at-1024.pdf"
+    beyond_limit.write_bytes(b"x" * 1024 + b"%PDF-1.7\\n")
+
+    report = analyze_pdf(beyond_limit)
+
+    assert report["metrics"]["pdf_header_found"] is False
+    assert report["metrics"]["pdf_header_offset"] is None
+    assert report["structural_analysis"]["status"] == "skipped_not_pdf"
+
+
+def test_non_integer_declared_pdf_page_count_is_not_trusted(monkeypatch):
+    from pypdf.generic import FloatObject
+
+    pages = DictionaryObject({
+        NameObject("/Count"): FloatObject(2.5)
+    })
+    root = DictionaryObject({
+        NameObject("/Pages"): pages
+    })
+    trailer = DictionaryObject({
+        NameObject("/Root"): root
+    })
+
+    result = analyze_fake_pdf(monkeypatch, trailer)
+
+    assert result["page_count_declared"] is None
+    assert any(
+        "declared page count" in warning.lower()
+        and "not trusted" in warning.lower()
+        for warning in result["warnings"]
+    )
+
+def test_declared_page_count_upper_boundary_and_one_over(monkeypatch):
+    def report_for_count(count):
+        pages = DictionaryObject({
+            NameObject("/Count"): NumberObject(count)
+        })
+        root = DictionaryObject({
+            NameObject("/Pages"): pages
+        })
+        trailer = DictionaryObject({
+            NameObject("/Root"): root
+        })
+        return analyze_fake_pdf(monkeypatch, trailer)
+
+    exact_limit = report_for_count(10_000_000)
+    assert exact_limit["page_count_declared"] == 10_000_000
+
+    over_limit = report_for_count(10_000_001)
+    assert over_limit["page_count_declared"] is None
+    assert any(
+        "declared page count was outside the reporting range"
+        in warning.lower()
+        for warning in over_limit["warnings"]
+    )
+
+def test_nested_names_dictionary_is_not_catalog_javascript_name_tree(monkeypatch):
+    nested_names = DictionaryObject({
+        NameObject("/JavaScript"): DictionaryObject()
+    })
+    nested_dictionary = DictionaryObject({
+        NameObject("/Names"): nested_names
+    })
+    root = DictionaryObject({
+        NameObject("/SyntheticNestedObject"): nested_dictionary
+    })
+    trailer = DictionaryObject({
+        NameObject("/Root"): root
+    })
+
+    result = analyze_fake_pdf(monkeypatch, trailer)
+
+    assert result["status"] == "parsed"
+    assert result["features"]["javascript_name_tree_present"] is False
+    assert not any(
+        finding.get("feature") == "javascript_name_tree"
+        for finding in result["findings"]
+    )
+
+def test_pdf_lexical_marker_count_respects_name_delimiters():
+    from cvevident.pdf_triage import _count_pdf_name, _find_pdf_name_offsets
+
+    data = (
+        b"/JS /JSExtra /JavaScript /JavaScriptExtra "
+        b"/JavaScript#41 /JS/ /JS%"
+    )
+
+    assert _count_pdf_name(data, b"/JS") == 3
+    assert _count_pdf_name(data, b"/JavaScript") == 1
+
+    js_offsets, js_truncated = _find_pdf_name_offsets(data, b"/JS")
+    javascript_offsets, javascript_truncated = _find_pdf_name_offsets(
+        data, b"/JavaScript"
+    )
+
+    assert js_offsets == [
+        data.index(b"/JS "),
+        data.index(b"/JS/"),
+        data.index(b"/JS%"),
+    ]
+    assert js_truncated is False
+    assert javascript_offsets == [data.index(b"/JavaScript ")]
+    assert javascript_truncated is False
+
+def test_escaped_pdf_name_is_recognized_structurally_when_lexical_scan_misses(
+    tmp_path,
+):
+    writer = PdfWriter()
+    writer.add_blank_page(width=72, height=72)
+    writer._root_object[NameObject("/OpenAction")] = writer._add_object(
+        DictionaryObject({
+            NameObject("/S"): NameObject("/JavaScript")
+        })
+    )
+
+    data = write_pdf(writer)
+    if data.count(b"/JavaScript") != 1:
+        raise AssertionError("Expected exactly one raw JavaScript action name.")
+
+    path = tmp_path / "escaped-javascript-name.pdf"
+    path.write_bytes(data.replace(b"/JavaScript", b"/Java#53cript", 1))
+
+    report = analyze_pdf(path)
+
+    assert report["metrics"]["marker_counts"]["pdf.javascript_name"] == 0
+    assert report["structural_analysis"]["features"]["javascript_action_count"] == 1
+    assert report["assessment"]["verdict"] == "not_assessed"

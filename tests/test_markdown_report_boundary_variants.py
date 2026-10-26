@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from cvevident.reporting import to_markdown
+from cvevident.reporting import to_html, to_markdown
 
 
 def _evidence(index: int, locator: dict, *, details: dict | None = None) -> dict:
@@ -121,3 +121,41 @@ def test_markdown_renders_bounded_and_alternative_source_locator_shapes() -> Non
     assert "additional occurrences omitted" in rendered
     assert "member list bounded" in rendered
     assert "word/document.xml; element w:fldSimple; target https://example.invalid/resource with newline" in rendered
+
+
+def test_markdown_untrusted_multiline_fields_cannot_create_report_sections() -> None:
+    newline = chr(10)
+    report = _report(
+        evidence=[
+            _evidence(
+                9,
+                {},
+                details={
+                    "description": "Evidence text" + newline + "## injected evidence heading",
+                    "interpretation": "Evidence context" + newline + "## injected interpretation heading",
+                },
+            )
+        ]
+    )
+    report["file"]["filename"] = "sample.docx" + newline + "## injected filename heading"
+    report["target_context"] = {
+        "target_product": "widget",
+        "interpretation": "Context text" + newline + "## injected context heading",
+    }
+    report["warnings"] = [
+        "Warning text" + newline + "## injected warning heading",
+        "Warning row" + newline + "| injected | table |",
+    ]
+
+    rendered = to_markdown(report)
+    lines = rendered.splitlines()
+
+    assert not any(line.startswith("## injected ") for line in lines)
+    assert not any(line.startswith("| injected | table |") for line in lines)
+
+
+def test_html_report_contains_valid_viewport_meta_tag() -> None:
+    rendered = to_html(_report())
+
+    assert '<meta name="viewport" content="width=device-width,initial-scale=1">' in rendered
+    assert "<metaname=" not in rendered

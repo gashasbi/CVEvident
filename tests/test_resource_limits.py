@@ -587,5 +587,21 @@ class LegacyCfbResourceLimitTests(unittest.TestCase):
         self.assertTrue(any("byte-order marker is invalid" in w for w in report["warnings"]))
 
 
+    def test_directory_entry_rejects_missing_utf16_terminator(self):
+        raw = bytearray(_cfb_entry("WordDocument", 2))
+        name_length = struct.unpack_from("<H", raw, 64)[0]
+        raw[name_length - 2:name_length] = b"AB"
+
+        entries, truncated, warnings = legacy_office_triage._parse_directory(
+            bytes(raw)
+        )
+
+        self.assertFalse(truncated)
+        self.assertEqual(entries[0]["name"], "<invalid-name-entry-0>")
+        self.assertTrue(
+            any("terminator" in warning.lower() for warning in warnings)
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

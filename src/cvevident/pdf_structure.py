@@ -127,10 +127,18 @@ def _with_pdf_resource_limits(function):
             return result
 
         try:
-            return function(data, is_pdf)
+            result = function(data, is_pdf)
         finally:
-            # pypdf's context manager resets its context-local configuration here.
-            context.__exit__(None, None, None)
+            try:
+                context.__exit__(None, None, None)
+            except Exception as exc:
+                result = _base_result("failed", version)
+                result["error_type"] = type(exc).__name__
+                result["warnings"].append(
+                    "PDF structural parsing results were discarded because pypdf resource-limit configuration "
+                    f"could not be restored ({type(exc).__name__})."
+                )
+        return result
 
     return wrapped
 
@@ -382,9 +390,19 @@ def analyze_pdf_structure(data: bytes, is_pdf: bool) -> dict[str, Any]:
             declared = pages_obj.get("/Count") if isinstance(pages_obj, DictionaryObject) else None
             if declared is not None:
                 declared_int = int(declared)
-                result["page_count_declared"] = declared_int if 0 <= declared_int <= 10_000_000 else None
-                if result["page_count_declared"] is None:
-                    result["warnings"].append("The declared page count was outside the reporting range and was not trusted.")
+                if isinstance(declared, bool) or not isinstance(declared, int):
+                    result["page_count_declared"] = None
+                    result["warnings"].append(
+                        "The declared page count was not an integer and was not trusted."
+                    )
+                else:
+                    result["page_count_declared"] = (
+                        declared_int if 0 <= declared_int <= 10_000_000 else None
+                    )
+                    if result["page_count_declared"] is None:
+                        result["warnings"].append(
+                            "The declared page count was outside the reporting range and was not trusted."
+                        )
         except Exception as exc:
             result["resolution_errors"] += 1
             result["resolution_error_types"].append(type(exc).__name__)
@@ -490,7 +508,7 @@ def analyze_pdf_structure(data: bytes, is_pdf: bool) -> dict[str, Any]:
                 # JavaScript actions can be referenced in the catalog's /Names dictionary;
                 # check that relationship explicitly rather than treating any key named
                 # /JavaScript elsewhere as a name-tree finding.
-                names_obj = obj.get("/Names")
+                names_obj = obj.get("/Names") if object_path == "/Root" else None
                 try:
                     names_reference = _reference_label(names_obj) if isinstance(names_obj, IndirectObject) else None
                     if isinstance(names_obj, IndirectObject):
@@ -583,6 +601,10 @@ def analyze_pdf_structure(data: bytes, is_pdf: bool) -> dict[str, Any]:
         # when the parser failed. Lexical observations remain available in pdf_triage.
         result["findings"] = []
         result["findings_truncated"] = False
+        result["features"] = _base_result(
+            "failed", result.get("parser_version")
+        )["features"]
+        result["page_count_declared"] = None
         result["warnings"].append(
             f"The structural PDF parser could not complete ({type(exc).__name__}); lexical observations are retained, not treated as a structural finding."
         )

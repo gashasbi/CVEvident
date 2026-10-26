@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import io
+import os
 import struct
+import subprocess
+import sys
 import tempfile
 import unittest
 import zipfile
@@ -192,6 +195,31 @@ class DispatchFailureMatrixTests(unittest.TestCase):
         self.assertEqual(pdf_report["structural_analysis"]["status"], "failed")
         self.assertEqual(pdf_report["assessment"]["verdict"], "not_assessed")
 
+    def test_empty_and_truncated_signatures_fail_cautiously(self):
+        cases = [
+            ("empty.pdf", b"", "structural_analysis", "skipped_not_pdf"),
+            ("empty.docx", b"", "office_analysis", "failed"),
+            ("empty.odt", b"", "odf_analysis", "failed"),
+            ("empty.rtf", b"", "rtf_analysis", "failed"),
+            ("empty.doc", b"", "legacy_office_analysis", "failed"),
+            ("partial-pdf.pdf", b"%PD", "structural_analysis", "skipped_not_pdf"),
+            ("partial-zip.docx", b"PK\\x03", "office_analysis", "failed"),
+            ("partial-zip.odt", b"PK\\x05", "odf_analysis", "failed"),
+            ("partial-rtf.rtf", b"{\\\\rt", "rtf_analysis", "failed"),
+            ("partial-ole.doc", OLE_SIGNATURE[:5], "legacy_office_analysis", "failed"),
+        ]
+        for filename, payload, section, expected_status in cases:
+            with self.subTest(filename=filename, size=len(payload)):
+                report = self._analyze(filename, payload)
+                self.assertIn(section, report)
+                self.assertEqual(report[section]["status"], expected_status)
+                self.assertEqual(report["assessment"]["verdict"], "not_assessed")
+                self.assertFalse(
+                    report["analysis_coverage"]["complete_for_declared_static_scope"]
+                )
+                self.assertTrue(report.get("analysis_id"))
+
+
     def test_failed_ooxml_zip_is_not_silently_reinterpreted_as_odf(self):
         report = self._analyze("corrupt.docx", b"PK\x03\x04" + b"not-a-complete-zip")
         self.assertIn("office_analysis", report)
@@ -225,11 +253,59 @@ class DispatchFailureMatrixTests(unittest.TestCase):
         self.assertIn(report["odf_analysis"]["status"], {"partial", "failed"})
         self.assertTrue(report["odf_analysis"]["warnings"])
 
+    def test_corrupt_ooxml_deflate_stream_is_reported_without_uncaught_error(self):
+        damaged = _corrupt_first_compressed_byte(
+            _ooxml_bytes(), "word/document.xml"
+        )
+        report = self._analyze("damaged-deflate.docx", damaged)
+        analysis = report["office_analysis"]
+
+        self.assertIn(analysis["status"], {"partial", "failed"})
+        self.assertTrue(analysis["warnings"])
+        self.assertEqual(report["assessment"]["verdict"], "not_assessed")
+        self.assertFalse(
+            report["analysis_coverage"]["complete_for_declared_static_scope"]
+        )
+
     def test_missing_files_are_reported_by_the_selected_analyzer(self):
         for filename in ("missing.pdf", "missing.docx", "missing.odt", "missing.rtf", "missing.doc"):
             with self.subTest(filename=filename):
                 with self.assertRaises(FileNotFoundError):
                     analyze_file(self.root / filename, db_path=self.db)
+
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "requires POSIX FIFO support")
+    def test_analyze_file_rejects_fifo_without_blocking(self):
+        fifo_path = self.root / "input.pdf"
+        os.mkfifo(fifo_path)
+
+        probe = "\n".join((
+            "import sys",
+            "from cvevident.analyzer import analyze_file",
+            "try:",
+            "    analyze_file(sys.argv[1], db_path=sys.argv[2])",
+            "except FileNotFoundError:",
+            "    raise SystemExit(0)",
+            "raise SystemExit(3)",
+        ))
+        try:
+            result = subprocess.run(
+                [sys.executable, "-c", probe, str(fifo_path), str(self.db)],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            self.fail(
+                "analyze_file blocked while probing a FIFO before bounded input validation"
+            )
+
+        self.assertEqual(
+            result.returncode,
+            0,
+            msg=f"stdout={result.stdout!r}; stderr={result.stderr!r}",
+        )
 
 
 if __name__ == "__main__":
