@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -169,6 +170,34 @@ def test_cli_analyze_returns_nonzero_when_parser_reports_failure(
     assert code == 1
     assert report["office_analysis"]["status"] == "failed"
     assert report["analysis_id"] is not None
+
+
+def test_cli_show_analysis_returns_error_for_corrupt_stored_summary(
+    capsys: pytest.CaptureFixture[str], db_path: Path, tmp_path: Path
+) -> None:
+    source = tmp_path / "corrupt-summary.rtf"
+    source.write_bytes(b"{\\rtf1\\ansi corrupt summary fixture}")
+
+    assert cli.main([
+        "--db", str(db_path), "analyze", str(source), "--format", "json"
+    ]) == 0
+    original = json.loads(capsys.readouterr().out)
+
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            "UPDATE analysis_runs SET summary_json = ? WHERE id = ?",
+            ("{invalid json", original["analysis_id"]),
+        )
+
+    code = cli.main([
+        "--db", str(db_path), "show-analysis",
+        str(original["analysis_id"]), "--format", "json",
+    ])
+    captured = capsys.readouterr()
+
+    assert code == 2
+    assert captured.out == ""
+    assert "error:" in captured.err
 
 
 def test_cli_show_analysis_rebuilds_saved_report_from_database(
