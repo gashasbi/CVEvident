@@ -200,6 +200,34 @@ def test_cli_show_analysis_returns_error_for_corrupt_stored_summary(
     assert "error:" in captured.err
 
 
+def test_cli_show_analysis_returns_error_for_corrupt_evidence_details(
+    capsys: pytest.CaptureFixture[str], db_path: Path, tmp_path: Path
+) -> None:
+    source = tmp_path / "corrupt-evidence.rtf"
+    source.write_bytes(b"{\\rtf1\\ansi corrupt evidence fixture}")
+
+    assert cli.main([
+        "--db", str(db_path), "analyze", str(source), "--format", "json"
+    ]) == 0
+    original = json.loads(capsys.readouterr().out)
+
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            "INSERT INTO evidence (analysis_id, evidence_type, evidence_key, value_text, severity, details_json) VALUES (?, ?, ?, ?, ?, ?)",
+            (original["analysis_id"], "fixture", "fixture", "{}", "info", "{invalid json"),
+        )
+
+    code = cli.main([
+        "--db", str(db_path), "show-analysis",
+        str(original["analysis_id"]), "--format", "json",
+    ])
+    captured = capsys.readouterr()
+
+    assert code == 2
+    assert captured.out == ""
+    assert "error:" in captured.err
+
+
 def test_cli_show_analysis_rebuilds_saved_report_from_database(
     capsys: pytest.CaptureFixture[str], db_path: Path, tmp_path: Path
 ) -> None:
