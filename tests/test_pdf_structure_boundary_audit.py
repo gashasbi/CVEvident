@@ -276,3 +276,16 @@ def test_structural_indicators_are_reported_without_executing_actions():
         for warning in result["warnings"]
     )
     assert "synthetic-test-code" not in str(result["findings"])
+
+
+def test_pdf_marker_count_does_not_materialize_all_matches(monkeypatch):
+    from cvevident import pdf_triage
+
+    data = b"/JavaScript " * 10000
+
+    def reject_findall(*args, **kwargs):
+        raise AssertionError("marker counting must not materialize every match")
+
+    monkeypatch.setattr(pdf_triage.re, "findall", reject_findall)
+
+    assert pdf_triage._count_pdf_name(data, b"/JavaScript") == 10000

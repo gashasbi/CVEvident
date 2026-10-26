@@ -54,7 +54,7 @@ def _count_pdf_name(data: bytes, name: bytes) -> int:
     # Avoid the /JS substring inside /JavaScript; PDF names end at a delimiter.
     # This is still lexical scanning and does not decode escaped PDF names.
     pattern = re.escape(name) + rb"(?=$|[\x00\x09\x0a\x0c\x0d\x20\x28\x29<>\[\]{}/%])"
-    return len(re.findall(pattern, data))
+    return sum(1 for _ in re.finditer(pattern, data))
 
 
 def _find_pdf_name_offsets(data: bytes, name: bytes, limit: int = 32) -> tuple[list[int], bool]:
