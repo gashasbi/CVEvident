@@ -420,3 +420,27 @@ def test_pdf_lexical_marker_count_respects_name_delimiters():
     assert js_truncated is False
     assert javascript_offsets == [data.index(b"/JavaScript ")]
     assert javascript_truncated is False
+
+def test_escaped_pdf_name_is_recognized_structurally_when_lexical_scan_misses(
+    tmp_path,
+):
+    writer = PdfWriter()
+    writer.add_blank_page(width=72, height=72)
+    writer._root_object[NameObject("/OpenAction")] = writer._add_object(
+        DictionaryObject({
+            NameObject("/S"): NameObject("/JavaScript")
+        })
+    )
+
+    data = write_pdf(writer)
+    if data.count(b"/JavaScript") != 1:
+        raise AssertionError("Expected exactly one raw JavaScript action name.")
+
+    path = tmp_path / "escaped-javascript-name.pdf"
+    path.write_bytes(data.replace(b"/JavaScript", b"/Java#53cript", 1))
+
+    report = analyze_pdf(path)
+
+    assert report["metrics"]["marker_counts"]["pdf.javascript_name"] == 0
+    assert report["structural_analysis"]["features"]["javascript_action_count"] == 1
+    assert report["assessment"]["verdict"] == "not_assessed"
