@@ -325,3 +325,26 @@ def test_pdf_header_offset_boundary_includes_last_allowed_start(tmp_path):
     assert report["metrics"]["pdf_header_found"] is False
     assert report["metrics"]["pdf_header_offset"] is None
     assert report["structural_analysis"]["status"] == "skipped_not_pdf"
+
+
+def test_non_integer_declared_pdf_page_count_is_not_trusted(monkeypatch):
+    from pypdf.generic import FloatObject
+
+    pages = DictionaryObject({
+        NameObject("/Count"): FloatObject(2.5)
+    })
+    root = DictionaryObject({
+        NameObject("/Pages"): pages
+    })
+    trailer = DictionaryObject({
+        NameObject("/Root"): root
+    })
+
+    result = analyze_fake_pdf(monkeypatch, trailer)
+
+    assert result["page_count_declared"] is None
+    assert any(
+        "declared page count" in warning.lower()
+        and "not trusted" in warning.lower()
+        for warning in result["warnings"]
+    )
