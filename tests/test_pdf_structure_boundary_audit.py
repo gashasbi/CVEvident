@@ -289,3 +289,19 @@ def test_pdf_marker_count_does_not_materialize_all_matches(monkeypatch):
     monkeypatch.setattr(pdf_triage.re, "findall", reject_findall)
 
     assert pdf_triage._count_pdf_name(data, b"/JavaScript") == 10000
+
+
+def test_pdf_marker_offsets_limit_exact_and_over_limit():
+    from cvevident.pdf_triage import _find_pdf_name_offsets
+
+    marker = b"/JavaScript"
+    data = b"/JavaScript /JavaScript"
+
+    offsets, truncated = _find_pdf_name_offsets(data, marker, limit=2)
+    assert offsets == [0, len(marker) + 1]
+    assert truncated is False
+
+    data += b" /JavaScript"
+    offsets, truncated = _find_pdf_name_offsets(data, marker, limit=2)
+    assert offsets == [0, len(marker) + 1]
+    assert truncated is True
