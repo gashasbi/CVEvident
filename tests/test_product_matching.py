@@ -138,6 +138,29 @@ class ProductMatchingTests(unittest.TestCase):
         narrowed = search_product_cves("log4j", self.db, vendor="Apache")
         self.assertEqual([row["cve_id"] for row in narrowed], ["CVE-2099-12345"])
 
+    def test_ambiguity_summary_survives_product_result_limit(self):
+        payload = {"vulnerabilities": []}
+        payload["vulnerabilities"].extend(self.nvd_payload(
+            cve_id="CVE-2099-12345", vendor="apache", product="log4j",
+            criteria_version="*",
+        )["vulnerabilities"])
+        payload["vulnerabilities"].extend(self.nvd_payload(
+            cve_id="CVE-2099-12346", vendor="example", product="log4j",
+            criteria_version="*",
+        )["vulnerabilities"])
+        self.import_payload("limited-ambiguity.json", payload)
+
+        results = search_product_cves("log4j", self.db, limit=1)
+        self.assertEqual(len(results), 1)
+        ambiguity = results[0]["query_ambiguity"]
+        self.assertEqual(ambiguity["status"], "ambiguous_multiple_product_identities")
+        self.assertEqual(ambiguity["distinct_matched_product_identity_count"], 2)
+        self.assertEqual(ambiguity["result_limit"], 1)
+        self.assertEqual(
+            results[0]["ranking_explanation"]["score_semantics"],
+            "lexical_retrieval_relevance_not_probability",
+        )
+
     def test_explicit_version_inside_numeric_range_is_classified_not_attributed(self):
         payload = self.nvd_payload(
             criteria_version="*", start_including="1.0", end_excluding="2.0"
@@ -290,6 +313,13 @@ class ProductMatchingTests(unittest.TestCase):
             {"wildcard_cpe_version", "exact_cpe_version_match"},
         )
         self.assertEqual(result["version_match_status"], "exact_cpe_version_match")
+        self.assertEqual(
+            result["ranking_explanation"]["version_match_status"],
+            result["version_match_status"],
+        )
+        self.assertTrue(result["applicability_context"]["nvd_cpe_vulnerable_flag"])
+        self.assertFalse(result["applicability_context"]["nested_configuration_evaluated"])
+        self.assertFalse(result["applicability_context"]["file_vulnerability_established"])
 
     def test_exact_sample_and_product_context_keep_distinct_association_bases(self):
         sample_matches = [{
