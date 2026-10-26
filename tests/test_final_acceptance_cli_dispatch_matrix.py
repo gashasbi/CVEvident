@@ -155,6 +155,22 @@ def test_cli_converts_database_initialization_errors_to_exit_code_two(
     assert "error: schema unavailable" in captured.err
 
 
+def test_cli_analyze_returns_nonzero_when_parser_reports_failure(
+    capsys: pytest.CaptureFixture[str], db_path: Path, tmp_path: Path
+) -> None:
+    source = tmp_path / "broken.docx"
+    source.write_bytes(b"PK\\x03\\x04broken")
+
+    code = cli.main([
+        "--db", str(db_path), "analyze", str(source), "--format", "json"
+    ])
+    report = json.loads(capsys.readouterr().out)
+
+    assert code == 1
+    assert report["office_analysis"]["status"] == "failed"
+    assert report["analysis_id"] is not None
+
+
 def test_cli_show_analysis_rebuilds_saved_report_from_database(
     capsys: pytest.CaptureFixture[str], db_path: Path, tmp_path: Path
 ) -> None:

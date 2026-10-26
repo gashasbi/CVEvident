@@ -275,7 +275,6 @@ def _report_analysis_failure(report: dict[str, Any]) -> tuple[str, str] | None:
         "odf_analysis",
         "legacy_office_analysis",
         "rtf_analysis",
-        "structural_analysis",
     ):
         section = report.get(component)
         if not isinstance(section, dict) or section.get("status") != "failed":
@@ -488,6 +487,7 @@ def main(argv: list[str] | None = None) -> int:
                 target_vendor=args.target_vendor, target_version=args.target_version,
             )
             _write_output(_render(report, args.format), args.output)
+            return 1 if _report_analysis_failure(report) else 0
         elif args.command == "analyze-batch":
             summary = _analyze_batch(args, db_path)
             _write_output(_render(summary, "json"), args.output)
