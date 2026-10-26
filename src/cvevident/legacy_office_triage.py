@@ -144,6 +144,9 @@ def _parse_directory(directory_bytes: bytes) -> tuple[list[dict[str, Any]], bool
         if name_length < 2 or name_length > 64 or name_length % 2:
             name = f"<invalid-name-entry-{index}>"
             warnings.append(f"Directory entry {index} has an invalid UTF-16 name length.")
+        elif raw[name_length - 2:name_length] != b"\x00\x00":
+            name = f"<invalid-name-entry-{index}>"
+            warnings.append(f"Directory entry {index} has a missing UTF-16 name terminator.")
         else:
             try:
                 name = raw[:name_length - 2].decode("utf-16le", errors="strict")
