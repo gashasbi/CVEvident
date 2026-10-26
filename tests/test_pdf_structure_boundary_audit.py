@@ -372,3 +372,26 @@ def test_declared_page_count_upper_boundary_and_one_over(monkeypatch):
         in warning.lower()
         for warning in over_limit["warnings"]
     )
+
+def test_nested_names_dictionary_is_not_catalog_javascript_name_tree(monkeypatch):
+    nested_names = DictionaryObject({
+        NameObject("/JavaScript"): DictionaryObject()
+    })
+    nested_dictionary = DictionaryObject({
+        NameObject("/Names"): nested_names
+    })
+    root = DictionaryObject({
+        NameObject("/SyntheticNestedObject"): nested_dictionary
+    })
+    trailer = DictionaryObject({
+        NameObject("/Root"): root
+    })
+
+    result = analyze_fake_pdf(monkeypatch, trailer)
+
+    assert result["status"] == "parsed"
+    assert result["features"]["javascript_name_tree_present"] is False
+    assert not any(
+        finding.get("feature") == "javascript_name_tree"
+        for finding in result["findings"]
+    )

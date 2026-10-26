@@ -508,7 +508,7 @@ def analyze_pdf_structure(data: bytes, is_pdf: bool) -> dict[str, Any]:
                 # JavaScript actions can be referenced in the catalog's /Names dictionary;
                 # check that relationship explicitly rather than treating any key named
                 # /JavaScript elsewhere as a name-tree finding.
-                names_obj = obj.get("/Names")
+                names_obj = obj.get("/Names") if object_path == "/Root" else None
                 try:
                     names_reference = _reference_label(names_obj) if isinstance(names_obj, IndirectObject) else None
                     if isinstance(names_obj, IndirectObject):
