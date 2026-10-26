@@ -156,6 +156,44 @@ def test_report_write_failure_is_recorded_and_later_file_is_still_processed(
     )
 
 
+def test_parser_and_report_write_failures_preserve_state_and_continue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    broken = tmp_path / "input" / "broken.docx"
+    broken.parent.mkdir(parents=True)
+    broken.write_bytes(b"PK\\x03\\x04broken")
+    later = tmp_path / "input" / "later.rtf"
+    later.write_bytes(b"{\\rtf1\\ansi later fixture}")
+    reports_dir = tmp_path / "reports"
+    output = tmp_path / "summary.json"
+    original_write_text = Path.write_text
+
+    def fail_first_report(self: Path, data: str, *args, **kwargs):
+        if self.parent == reports_dir and self.name.startswith("0001-"):
+            raise OSError("simulated report-write failure")
+        return original_write_text(self, data, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", fail_first_report)
+    exit_code, summary = _run_batch(
+        tmp_path, [broken, later], reports_dir=reports_dir, output=output
+    )
+    results = {Path(item["path"]).name: item for item in summary["results"]}
+
+    assert exit_code == 1
+    assert summary["status"] == "partial"
+    assert summary["counts"]["files_analyzed"] == 1
+    assert summary["counts"]["files_failed"] == 1
+    assert summary["counts"]["reports_written"] == 1
+    assert results["broken.docx"]["status"] == "error"
+    assert results["broken.docx"]["analysis_status"] == "failed"
+    assert results["broken.docx"]["stage"] == "report_write"
+    assert "simulated report-write failure" in results["broken.docx"]["error"]
+    assert "report_path" not in results["broken.docx"]
+    assert results["later.rtf"]["status"] == "ok"
+    assert Path(results["later.rtf"]["report_path"]).is_file()
+    assert json.loads(output.read_text(encoding="utf-8"))["status"] == "partial"
+
+
 def test_summary_output_write_failure_returns_cli_error(tmp_path: Path) -> None:
     pdf = _make_pdf(tmp_path / "input.pdf")
     output_directory = tmp_path / "summary-is-a-directory"
