@@ -141,6 +141,11 @@ class ProductMatchingTests(unittest.TestCase):
         result = search_product_cves("apache log4j", self.db, version="1.5")[0]
         self.assertEqual(result["version_match_status"], "exact_cpe_version_mismatch")
 
+    def test_equivalent_numeric_versions_with_trailing_zero_components_match(self):
+        self.import_payload("equivalent-versions.json", self.nvd_payload(criteria_version="2.0"))
+        result = search_product_cves("apache log4j", self.db, version="2.0.0")[0]
+        self.assertEqual(result["version_match_status"], "exact_cpe_version_match")
+
     def test_unsupported_version_syntax_is_indeterminate(self):
         payload = self.nvd_payload(
             criteria_version="*", start_including="1.0-beta", end_excluding="2.0"
@@ -154,6 +159,30 @@ class ProductMatchingTests(unittest.TestCase):
         result = search_product_cves("apache log4j", self.db)[0]
         self.assertEqual(result["version_match_status"], "range_metadata_available_target_version_missing")
         self.assertIn("no target version was supplied", result["version_context"]["interpretation"])
+
+    def test_version_equal_to_inclusive_lower_bound_is_within_declared_range(self):
+        payload = self.nvd_payload(
+            criteria_version="*", start_including="1.0", end_excluding="2.0"
+        )
+        self.import_payload("inclusive-lower.json", payload)
+        result = search_product_cves("apache log4j", self.db, version="1.0")[0]
+        self.assertEqual(result["version_match_status"], "within_declared_numeric_version_bounds")
+
+    def test_version_equal_to_exclusive_lower_bound_is_outside_declared_range(self):
+        payload = self.nvd_payload(
+            criteria_version="*", start_excluding="1.0", end_including="2.0"
+        )
+        self.import_payload("exclusive-lower.json", payload)
+        result = search_product_cves("apache log4j", self.db, version="1.0")[0]
+        self.assertEqual(result["version_match_status"], "outside_declared_numeric_version_bounds")
+
+    def test_version_equal_to_inclusive_upper_bound_is_within_declared_range(self):
+        payload = self.nvd_payload(
+            criteria_version="*", start_including="1.0", end_including="2.0"
+        )
+        self.import_payload("inclusive-upper.json", payload)
+        result = search_product_cves("apache log4j", self.db, version="2.0")[0]
+        self.assertEqual(result["version_match_status"], "within_declared_numeric_version_bounds")
 
     def test_source_freshness_separates_nvd_kev_and_epss(self):
         self.import_payload("nvd.json", self.nvd_payload(criteria_version="*"))
