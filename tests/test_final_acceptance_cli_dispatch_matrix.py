@@ -179,6 +179,44 @@ def test_cli_show_analysis_rebuilds_saved_report_from_database(
     assert rebuilt["evidence"] == original["evidence"]
 
 
+def test_cli_analyze_output_write_failure_returns_error(
+    capsys: pytest.CaptureFixture[str], db_path: Path, tmp_path: Path
+) -> None:
+    source = tmp_path / "output-failure.rtf"
+    source.write_bytes(b"{\\rtf1\\ansi output failure fixture}")
+    output_dir = tmp_path / "existing-output-directory"
+    output_dir.mkdir()
+
+    assert cli.main([
+        "--db", str(db_path), "analyze", str(source),
+        "--format", "json", "--output", str(output_dir),
+    ]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "error:" in captured.err
+
+
+def test_cli_show_analysis_output_write_failure_returns_error(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    db_path: Path,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(cli, "get_analysis", lambda *_args, **_kwargs: {
+        "analysis_id": 7, "file": {"filename": "sample.rtf"}, "evidence": [], "warnings": []
+    })
+    output_dir = tmp_path / "existing-output-directory"
+    output_dir.mkdir()
+
+    assert cli.main([
+        "--db", str(db_path), "show-analysis", "7",
+        "--format", "json", "--output", str(output_dir),
+    ]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "error:" in captured.err
+
+
 def test_cli_show_analysis_renders_found_report_to_requested_format(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], db_path: Path
 ) -> None:
