@@ -41,7 +41,17 @@ CVEvident uses a cautious assessment model. The overall verdict is generally `no
 - **Failed** indicates that the selected parser could not carry out its intended inspection path.
 - **Unsupported** indicates that the parser did not recognize a supported structure or format.
 
-Status values can differ by parser, so always read the report fields and warnings rather than assuming every parser uses identical semantics.
+Status values can differ by parser, so always read the report fields and warnings rather than assuming every parser uses identical semantics. A report may be saved and assigned an `analysis_id` even when its primary format parser reports `failed`.
+
+## CLI exit status and report persistence
+
+The exit code describes the command's processing outcome; it is not a malware verdict.
+
+- **`analyze`:** returns `0` when the command completes without a primary-parser failure. It returns `1` when the selected primary parser for OOXML, OpenDocument, legacy Office, or RTF reports `failed`, even if the report was successfully printed or written and saved. A PDF structural warning or partial structural result does not automatically make the command fail. An operational error such as a database or output-write failure returns `2`.
+- **`analyze-batch`:** returns `0` when its summary status is `ok`; it returns `1` when the summary is `partial` or `failed`. A parser-reported failure is represented in that file's result with `status: error`, `analysis_status: failed`, and `stage: analysis`. If the report was written, `report_path` can still be present. A failed report write uses `stage: report_write` and does not imply that the analysis itself failed. The batch continues with later inputs.
+- **`show-analysis`:** returns `0` when a saved analysis is found and rendered, `1` when the ID is not found, and `2` for supported operational errors such as malformed stored JSON or a failed output write.
+
+When `--output PATH` is supplied, a successful write prints a small JSON confirmation to standard output instead of printing the full report there. Consequently, a parser failure can return `1` while the requested report file was still written successfully. Read the report's parser status and warnings as well as the exit code.
 
 ## Evidence bases must remain distinct
 
@@ -51,6 +61,14 @@ CVEvident may report two different kinds of CVE-related context:
 2. **Product-context retrieval:** a user-supplied product name, optional vendor, and optional version are compared with locally imported affected-product records. This is a candidate retrieval result, not proof that the file is the product, contains the product, or is affected by the CVE.
 
 These bases are intentionally kept separate. CVE links from sample metadata retain their recorded provenance and verification state; lexical product matches are not converted into file attribution. KEV and EPSS are vulnerability-level signals, not document evidence.
+
+Product-context results include three explanation areas:
+
+- `ranking_explanation` reports the name-match class, matching vendor/product terms, version-match status, lexical relevance score, KEV/EPSS values, and the sort order used for retrieval. The score is not a probability, confidence estimate, or exploitability rating.
+- `applicability_context` shows the NVD CPE vulnerable flag and explicitly records that nested NVD configuration logic, product presence in the analyzed file, and file vulnerability have not been established by this search.
+- `query_ambiguity` summarizes distinct vendor/product identities found across matching CPE rows before the result limit is applied. The displayed identity list can be truncated for large result sets.
+
+Read these fields as explanations of how a local retrieval candidate was selected, not as an applicability determination for the file.
 
 ## Replay a saved report
 

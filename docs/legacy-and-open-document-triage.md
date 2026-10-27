@@ -42,4 +42,4 @@ cvevident analyze ./document.odt --format markdown --output ./reports/document.m
 cvevident analyze ./rich-text.rtf --format html --output ./reports/rich-text.html
 ```
 
-Format dispatch prefers recognizable content signatures where available; file extensions are fallbacks, not proof of actual content. A wrong suffix may be reported. For general interpretation guidance, see [Analysis and reports](analysis-and-reports.md) and [Security and limitations](security-and-limitations.md).
+Format dispatch prefers recognizable content signatures where available; file extensions are fallbacks, not proof of actual content. A wrong suffix may be reported. If the primary parser for legacy Office, OpenDocument, or RTF reports `failed`, `analyze` returns exit code `1`, while the report can still be persisted. In batch mode, that file is recorded as failed and later files continue to be processed. For general interpretation guidance, see [Analysis and reports](analysis-and-reports.md) and [Security and limitations](security-and-limitations.md).

@@ -11,7 +11,7 @@ It is not a malware verdict engine, a dynamic sandbox, a document renderer, or p
 - **Static file triage:** examines PDF, modern Office Open XML, legacy OLE/CFB Office, OpenDocument, and RTF files within configured resource limits.
 - **Content-aware identification:** uses file signatures and package metadata where available instead of trusting the filename alone; mismatches and incomplete parsing are reported.
 - **Evidence and traceability:** records file identity, parser observations, bounded structural findings, warnings, and source-location details when the parser can provide them.
-- **Local CVE context:** searches vulnerability and affected-product records imported from NVD, CISA's Known Exploited Vulnerabilities (KEV) catalog, and FIRST EPSS data.
+- **Local CVE context:** searches vulnerability and affected-product records imported from NVD, CISA's Known Exploited Vulnerabilities (KEV) catalog, and FIRST EPSS data. Product-context results explain lexical match signals, version context, ranking inputs, and identity ambiguity without claiming that the file is affected.
 - **Exact reference-sample matching:** can compare a file's SHA-256 with metadata registered in a local reference-sample collection. This is an exact byte-identity match, not a conclusion about related files.
 - **Reusable reports:** emits JSON, Markdown, or HTML reports and stores analysis records and evidence in SQLite for later retrieval.
 - **Batch workflows:** analyzes multiple files or directories, tracks per-file failures, and can write individual JSON reports plus a summary.
@@ -98,7 +98,7 @@ cvevident analyze-batch ./incoming-documents \
   --output ./reports/batch-summary.json
 ```
 
-Batch mode is non-recursive unless `--recursive` is supplied. It writes JSON summaries and, when requested, one JSON report per analyzed file. The file-count limit and input-byte limit help bound the work performed.
+Batch mode is non-recursive unless `--recursive` is supplied. It writes JSON summaries and, when requested, one JSON report per analyzed file. The file-count limit and input-byte limit help bound the work performed. A parser-reported failure can still have a saved report; the batch row records the analysis failure separately from a report-write failure. The command returns a nonzero status when the batch is partial or failed.
 
 ## Using local CVE data
 
@@ -130,7 +130,7 @@ cvevident show-cve CVE-2024-12345
 cvevident search-product "Acme Reader" --vendor acme --version 2.4
 ```
 
-The CVE identifier above is an illustrative command argument; use the identifier you actually want to look up. Product search is based on local affected-product CPE fields and uses conservative matching. It does not evaluate all NVD applicability logic. See [Local CVE data](docs/local-cve-data.md).
+The CVE identifier above is an illustrative command argument; use the identifier you actually want to look up. Product search is based on local affected-product CPE fields and uses conservative matching. Its ranking score is a retrieval-relevance score, not a probability. The `ranking_explanation`, `applicability_context`, and `query_ambiguity` fields explain the match and its limitations; they do not establish product presence in the file or prove file vulnerability. The tool does not evaluate the full NVD applicability tree. See [Local CVE data](docs/local-cve-data.md) and [Analysis and reports](docs/analysis-and-reports.md).
 
 ## Command overview
 

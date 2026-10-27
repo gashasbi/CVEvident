@@ -51,7 +51,7 @@ The default bounded-inspection limits include:
 | External relationship examples shown | 25 |
 | Package-part inventory examples shown | 80 |
 
-The input-size cap can be changed with the `analyze` command's `--max-bytes` option. The other limits are parser configuration defaults rather than CLI flags. If the analyzer skips content, encounters ambiguity, or reaches a cap, it records warnings and may use a `partial` status rather than claiming complete inspection.
+The input-size cap can be changed with the `analyze` command's `--max-bytes` option. The other limits are parser configuration defaults rather than CLI flags. If the analyzer skips content, encounters ambiguity, or reaches a cap, it records warnings and may use a `partial` status rather than claiming complete inspection. If the primary OOXML parser reports `failed`, `analyze` returns exit code `1`; `analyze-batch` marks that file as an analysis failure and continues with other inputs. A report can still be preserved in either workflow. See [Analysis and reports](analysis-and-reports.md) for command exit semantics.
 
 ## Example
 

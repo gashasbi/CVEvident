@@ -12,7 +12,7 @@ CVEvident performs bounded static inspection of selected document families. It i
 | OpenDocument | `.odt`, `.ott`, `.ods`, `.ots`, `.odp`, `.otp` | ZIP package inventory, first-member `mimetype` identification, selected XML, manifest entries, and script/macro/embedded-object/external-reference indicators |
 | Rich Text Format | `.rtf` or a recognized RTF signature | Bounded control-word and group scan, selected field-instruction and external-target strings, and indicators for embedded/binary content |
 
-The format selected for analysis is based on content signatures first, with filename extensions used as a fallback in supported cases. A mismatch may be reported. A ZIP file without recognized Office or OpenDocument markers is not treated as a supported document just because it has a familiar extension.
+The format selected for analysis is based on content signatures first, with filename extensions used as a fallback in supported cases. A mismatch may be reported. A ZIP file without recognized Office or OpenDocument markers is not treated as a supported document just because it has a familiar extension. For an unrecognized suffix or non-document input, the current dispatch path falls back to the PDF analyzer; the report may show `structural_analysis.status` as `skipped_not_pdf` without treating the unknown format as a primary-parser failure. Do not interpret this fallback as support for the unknown format.
 
 ## Important scope boundaries
 
@@ -34,7 +34,7 @@ OpenDocument inspection is package- and XML-focused. RTF inspection is lexical a
 
 ## Unsupported or incomplete inputs
 
-Depending on the format and failure point, a report may show `unsupported`, `failed`, `partial`, or another parser-specific status. A failed parser path may still preserve file identity and warnings. A partial report means that inspection was limited; it should not be read as a complete assessment of the file.
+Depending on the format and failure point, a report may show `unsupported`, `failed`, `partial`, or another parser-specific status. A failed parser path may still preserve file identity and warnings. A partial report means that inspection was limited; it should not be read as a complete assessment of the file. A parser status of `failed` can still produce a persisted report. For the current command-level exit behavior, see [Analysis and reports](analysis-and-reports.md).
 
 See the format-specific guides for detailed inspection boundaries:
 

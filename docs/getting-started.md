@@ -61,6 +61,8 @@ Available output formats are `json`, `markdown`, and `html`. The default is JSON
 
 The input is read with a 100 MiB maximum by default. Set `--max-bytes` when a legitimate file requires a different limit; a larger limit also allows a larger input to be read and should be chosen deliberately.
 
+A report can be saved even when the primary OOXML, OpenDocument, legacy Office, or RTF parser reports `failed`; in that case `analyze` returns exit code `1` and the report records the parser failure. A CLI, database, or output-write error returns exit code `2`. A nonzero exit code is a processing signal, not a malware verdict. Inspect the report status and warnings before interpreting the result.
+
 ## 4. Add optional product context
 
 Product context is an explicit query against locally imported affected-product records. For example:
@@ -86,7 +88,7 @@ cvevident analyze-batch ./incoming \
   --output ./reports/summary.json
 ```
 
-Batch scanning is non-recursive by default. `--max-files` limits the number of unique files selected. The summary records per-file success or failure and can report partial results if discovery, analysis, or report writing fails. Individual reports, when requested, are JSON.
+Batch scanning is non-recursive by default. `--max-files` limits the number of unique files selected. The summary records per-file success or failure and can report partial results if discovery, analysis, or report writing fails. Individual reports, when requested, are JSON. Parser-reported failures are counted as file failures even when a report file is preserved; report-write failures are identified separately. The command returns `0` for a summary status of `ok`, `1` for `partial` or `failed`, and `2` if the summary itself cannot be written or another handled operational error occurs. A failure for one file does not stop processing later files.
 
 ## 6. Populate the local CVE database
 
@@ -103,13 +105,13 @@ The NVD modified-date command only retrieves recently modified records; it does 
 
 ## 7. Inspect or replay saved results
 
-Every successful analysis is stored in the database. The report includes an `analysis_id`. Use it to rebuild a saved report in another format:
+When an analysis report is stored, it includes an `analysis_id`, including reports whose primary parser reported a failure. Use that ID to render the saved report in another format:
 
 ```bash
 cvevident show-analysis 1 --format html --output ./reports/replayed.html
 ```
 
-Replace `1` with the ID returned by your own analysis. The underlying file is not re-analyzed by `show-analysis`; the stored report data is rendered again.
+Replace `1` with an analysis ID from your database. The underlying file is not re-analyzed by `show-analysis`; the stored report data is rendered again. If the ID is absent, the command returns `1`. If the stored summary or evidence details contain malformed JSON, it reports an operational error and returns `2` rather than rendering a partial report.
 
 ## Troubleshooting
 
