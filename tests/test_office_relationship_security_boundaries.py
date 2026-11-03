@@ -65,6 +65,7 @@ class TestOfficeRelationshipTargetBoundaries:
         [
             "https://example.invalid/document.xml",
             "http://example.invalid/document.xml",
+            "http://[broken",
             "//example.invalid/document.xml",
             "word/document.xml?query=1",
             "word/document.xml#fragment",

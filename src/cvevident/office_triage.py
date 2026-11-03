@@ -129,7 +129,10 @@ def _relationship_source(rels_name: str) -> str:
 
 def _resolve_package_relationship_target(target: str) -> str | None:
     """Resolve a root relationship target to a safe package member name."""
-    parsed = urlsplit(target)
+    try:
+        parsed = urlsplit(target)
+    except ValueError:
+        return None
     if parsed.scheme or parsed.netloc or parsed.query or parsed.fragment:
         return None
     path = unquote(parsed.path)
