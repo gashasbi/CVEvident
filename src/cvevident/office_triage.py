@@ -640,7 +640,7 @@ def analyze_office(
                     local == "definedname" and family == "excel" and info.filename == main_part
                 ):
                     formula = _safe_text(node.text, 2_000)
-                    if _EXTERNAL_WORKBOOK_REFERENCE.search(formula):
+                    if _EXTERNAL_WORKBOOK_REFERENCE.search(_strip_excel_string_literals(formula)):
                         features["external_formula_reference_count"] = int(features["external_formula_reference_count"]) + 1
                     if _contains_external_content_function(formula):
                         features["formula_network_function_count"] = int(features["formula_network_function_count"]) + 1

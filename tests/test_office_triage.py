@@ -244,6 +244,26 @@ class OfficeTriageTests(unittest.TestCase):
         features = report["office_analysis"]["features"]
         self.assertEqual(features["external_formula_reference_count"], 0)
 
+    def test_ignores_external_workbook_references_inside_excel_string_literals(self):
+        extras = {
+            "xl/worksheets/sheet1.xml": (
+                '<worksheet xmlns="urn:test:excel"><sheetData><row>'
+                '<c r="A1"><f>"[Budget.xlsx]Annual!A1"</f></c>'
+                '<c r="A2"><f>IF(A1="[Fake.xlsx]Sheet1!A1",'
+                "'[Real.xlsx]Annual Summary'!B2,0)</f></c>"
+                '<c r="A3"><f>="text ""[Quoted.xlsx]Sheet1!A1"""</f></c>'
+                '</row></sheetData></worksheet>'
+            ).encode(),
+        }
+        path = create_office_package(
+            self.root / "external-reference-string-literals.xlsx",
+            "xlsx",
+            extras,
+        )
+        report = analyze_office(str(path))
+        features = report["office_analysis"]["features"]
+        self.assertEqual(features["external_formula_reference_count"], 1)
+
     def test_ignores_network_function_names_inside_excel_string_literals(self):
         extras = {
             "xl/worksheets/sheet1.xml": (
