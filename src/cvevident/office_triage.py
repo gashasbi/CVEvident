@@ -571,6 +571,13 @@ def analyze_office(
                         features["formula_network_function_count"] = int(features["formula_network_function_count"]) + 1
                 elif local == "instrtext" and _FIELD_INSTRUCTIONS.search(node.text or ""):
                     features["field_instruction_count"] = int(features["field_instruction_count"]) + 1
+                elif local == "fldsimple":
+                    instruction = next(
+                        (value for key, value in node.attrib.items() if _local_name(key) == "instr"),
+                        "",
+                    )
+                    if _FIELD_INSTRUCTIONS.search(instruction):
+                        features["field_instruction_count"] = int(features["field_instruction_count"]) + 1
             del root
 
         package_status = "partial" if partial else "parsed"

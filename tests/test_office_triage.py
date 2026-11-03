@@ -129,6 +129,28 @@ class OfficeTriageTests(unittest.TestCase):
         self.assertEqual(features["ole_object_element_count"], 1)
         self.assertEqual(features["hyperlink_element_count"], 2)
 
+    def test_detects_field_instruction_in_simple_word_field(self):
+        extras = {
+            "word/document.xml": (
+                '<w:document xmlns:w="urn:test:word"><w:body><w:p>'
+                '<w:fldSimple w:instr=" HYPERLINK &quot;https://example.test/&quot; ">'
+                '<w:r><w:t>link</w:t></w:r></w:fldSimple>'
+                '</w:p></w:body></w:document>'
+            ).encode(),
+        }
+        path = create_office_package(self.root / "simple-field.docx", "docx", extras)
+        report = analyze_office(str(path))
+        self.assertEqual(report["office_analysis"]["features"]["field_instruction_count"], 1)
+
+        extras["word/document.xml"] = (
+            '<w:document xmlns:w="urn:test:word"><w:body><w:p>'
+            '<w:fldSimple w:instr=" PAGE "><w:r><w:t>1</w:t></w:r></w:fldSimple>'
+            '</w:p></w:body></w:document>'
+        ).encode()
+        path = create_office_package(self.root / "ordinary-field.docx", "docx", extras)
+        report = analyze_office(str(path))
+        self.assertEqual(report["office_analysis"]["features"]["field_instruction_count"], 0)
+
     def test_detects_excel_external_formula_indicators(self):
         extras = {
             "xl/worksheets/sheet1.xml": (
