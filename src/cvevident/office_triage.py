@@ -71,6 +71,40 @@ _EXTERNAL_WORKBOOK_REFERENCE = re.compile(
 _FIELD_INSTRUCTIONS = re.compile(r"\b(?:DDEAUTO|DDE|INCLUDETEXT|INCLUDEPICTURE|HYPERLINK)\b", re.I)
 
 
+def _strip_excel_string_literals(formula: str) -> str:
+    parts: list[str] = []
+    inside_string = False
+    index = 0
+
+    while index < len(formula):
+        character = formula[index]
+
+        if character == '"':
+            if (
+                inside_string
+                and index + 1 < len(formula)
+                and formula[index + 1] == '"'
+            ):
+                index += 2
+                continue
+
+            inside_string = not inside_string
+            index += 1
+            continue
+
+        if not inside_string:
+            parts.append(character)
+
+        index += 1
+
+    return "".join(parts)
+
+
+def _contains_external_content_function(formula: str) -> bool:
+    normalized = _strip_excel_string_literals(formula)
+    return _EXTERNAL_CONTENT_FUNCTIONS.search(normalized) is not None
+
+
 def _count_split_field_instructions(root: ElementTree.Element) -> int:
     fields: list[dict[str, Any]] = []
     count = 0
@@ -608,7 +642,7 @@ def analyze_office(
                     formula = _safe_text(node.text, 2_000)
                     if _EXTERNAL_WORKBOOK_REFERENCE.search(formula):
                         features["external_formula_reference_count"] = int(features["external_formula_reference_count"]) + 1
-                    if _EXTERNAL_CONTENT_FUNCTIONS.search(formula):
+                    if _contains_external_content_function(formula):
                         features["formula_network_function_count"] = int(features["formula_network_function_count"]) + 1
                 elif local == "instrtext" and _FIELD_INSTRUCTIONS.search(node.text or ""):
                     features["field_instruction_count"] = int(features["field_instruction_count"]) + 1

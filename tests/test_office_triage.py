@@ -244,6 +244,24 @@ class OfficeTriageTests(unittest.TestCase):
         features = report["office_analysis"]["features"]
         self.assertEqual(features["external_formula_reference_count"], 0)
 
+    def test_ignores_network_function_names_inside_excel_string_literals(self):
+        extras = {
+            "xl/worksheets/sheet1.xml": (
+                '<worksheet xmlns="urn:test:excel"><sheetData><row>'
+                '<c r="A1"><f>"WEBSERVICE("</f></c>'
+                '<c r="A2"><f>IFERROR(wEbSeRvIcE("https://example.invalid/"),0)</f></c>'
+                '<c r="A3"><f>WEBSERVICEX("https://example.invalid/")</f></c>'
+                '<c r="A4"><f>="text ""WEBSERVICE("" text"</f></c>'
+                '</row></sheetData></worksheet>'
+            ).encode(),
+        }
+        path = create_office_package(
+            self.root / "formula-string-literals.xlsx", "xlsx", extras
+        )
+        report = analyze_office(str(path))
+        features = report["office_analysis"]["features"]
+        self.assertEqual(features["formula_network_function_count"], 1)
+
     def test_realistic_presentation_with_slide_content_type_is_parsed(self):
         # A normal PPTX manifest declares both presentation.xml and every slide part.
         # Slide content types are not competing package main parts; the root
