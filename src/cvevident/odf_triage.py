@@ -37,6 +37,35 @@ _EXTERNAL_FORMULA = re.compile(r"(?i)(?:WEBSERVICE|DDE|HYPERLINK|COM\.MICROSOFT\
 _URL_SCHEME = re.compile(r"^[a-z][a-z0-9+.-]*:", re.I)
 
 
+def _strip_formula_string_literals(formula: str) -> str:
+    parts: list[str] = []
+    inside_string = False
+    index = 0
+
+    while index < len(formula):
+        character = formula[index]
+
+        if character == '"':
+            if (
+                inside_string
+                and index + 1 < len(formula)
+                and formula[index + 1] == '"'
+            ):
+                index += 2
+                continue
+
+            inside_string = not inside_string
+            index += 1
+            continue
+
+        if not inside_string:
+            parts.append(character)
+
+        index += 1
+
+    return "".join(parts)
+
+
 def is_opendocument_package(data: bytes) -> bool:
     """Return True only when a ZIP has a recognized ODF mimetype part."""
     try:
@@ -275,7 +304,7 @@ def analyze_opendocument(path: str, max_bytes: int = 100 * 1024 * 1024,
                             external_refs.append({"part": name, "element": _safe_text(local, 100), "target": attr_val})
                     if attr_local == "formula" and attr_val:
                         feature_counts["formula_attribute_count"] += 1
-                        if _EXTERNAL_FORMULA.search(attr_val):
+                        if _EXTERNAL_FORMULA.search(_strip_formula_string_literals(attr_val)):
                             feature_counts["external_or_network_formula_count"] += 1
 
         if feature_counts.get("encrypted_member_manifest_entry_count", 0):

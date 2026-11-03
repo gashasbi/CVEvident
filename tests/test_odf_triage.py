@@ -59,6 +59,27 @@ class OdfTriageTests(unittest.TestCase):
         self.assertTrue(any(key.startswith("odf.external_references") for key in [e["key"] for e in report["evidence"]]))
         self.assertEqual(report["assessment"]["verdict"], "not_assessed")
 
+    def test_ignores_external_formula_names_inside_string_literals(self):
+        content = (
+            '<office:document-content '
+            'xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" '
+            'xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0">'
+            '<office:body><office:spreadsheet><table:table><table:table-row>'
+            '<table:table-cell table:formula="of:=&quot;WEBSERVICE(&quot;"/>'
+            '<table:table-cell table:formula="of:=IF(1=1;&quot;WEBSERVICE(&quot;;WEBSERVICE(&quot;https://example.test/data&quot;))"/>'
+            '<table:table-cell table:formula="of:=&quot;text &quot;&quot;WEBSERVICE(&quot;&quot; text&quot;"/>'
+            '</table:table-row></table:table></office:spreadsheet></office:body>'
+            '</office:document-content>'
+        )
+        data = build_odf(
+            mimetype="application/vnd.oasis.opendocument.spreadsheet",
+            content=content,
+        )
+        report = self.analyze("formula-string-literals.ods", data)
+        features = report["odf_analysis"]["features"]
+        self.assertEqual(features["formula_attribute_count"], 3)
+        self.assertEqual(features["external_or_network_formula_count"], 1)
+
     def test_supports_spreadsheet_and_presentation_mimetypes(self):
         for extension, mime in (("ods", "application/vnd.oasis.opendocument.spreadsheet"),
                                 ("ots", "application/vnd.oasis.opendocument.spreadsheet-template"),
