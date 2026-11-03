@@ -24,6 +24,37 @@ _CONTROL_WORD_START = frozenset(b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRST
 _HEX = frozenset(b"0123456789abcdefABCDEF")
 
 
+def _skip_rtf_fallback(data: bytes, start: int, count: int) -> int:
+    index = start
+    for _ in range(count):
+        if index >= len(data):
+            return len(data)
+        if data[index] != 0x5C:
+            index += 1
+            continue
+        if index + 1 >= len(data):
+            return len(data)
+        following = data[index + 1]
+        if following == 0x27 and index + 3 < len(data) and data[index + 2] in _HEX and data[index + 3] in _HEX:
+            index += 4
+            continue
+        if following in _CONTROL_WORD_START:
+            cursor = index + 1
+            while cursor < len(data) and data[cursor] in _CONTROL_WORD_START:
+                cursor += 1
+            if cursor < len(data) and data[cursor] == 0x2D:
+                cursor += 1
+            digits_start = cursor
+            while cursor < len(data) and 0x30 <= data[cursor] <= 0x39 and cursor - digits_start < 12:
+                cursor += 1
+            if cursor < len(data) and data[cursor] == 0x20:
+                cursor += 1
+            index = max(index + 2, cursor)
+            continue
+        index += 2
+    return index
+
+
 def has_rtf_signature(data: bytes) -> bool:
     """Return whether the bounded prefix has a recognizable RTF header."""
     return bool(RTF_HEADER.match(data[:128]))
@@ -73,6 +104,7 @@ def _scan_rtf(data: bytes) -> dict[str, Any]:
     # Stack marks whether the current group is a \fldinst destination. A nested group
     # inherits that state; \fldinst changes the top group only.
     fldinst_stack: list[bool] = []
+    unicode_fallback_stack: list[int] = []
     while i < len(data):
         byte = data[i]
         if byte == 0x7B:  # {
@@ -82,6 +114,7 @@ def _scan_rtf(data: bytes) -> dict[str, Any]:
                 depth_limited = True
                 break
             fldinst_stack.append(fldinst_stack[-1] if fldinst_stack else False)
+            unicode_fallback_stack.append(unicode_fallback_stack[-1] if unicode_fallback_stack else 1)
             i += 1
             continue
         if byte == 0x7D:  # }
@@ -91,6 +124,8 @@ def _scan_rtf(data: bytes) -> dict[str, Any]:
                 depth -= 1
             if fldinst_stack:
                 fldinst_stack.pop()
+            if unicode_fallback_stack:
+                unicode_fallback_stack.pop()
             i += 1
             continue
         if byte != 0x5C:  # backslash
@@ -148,15 +183,21 @@ def _scan_rtf(data: bytes) -> dict[str, Any]:
             controls[word] += 1
         if word == "fldinst" and fldinst_stack:
             fldinst_stack[-1] = True
-        if word == "bin" and parameter is not None and parameter >= 0:
-            # The delimiter space (if present) was consumed above. Binary payload
-            # bytes are not tokenized, avoiding false indicators inside embedded data.
+        if word == "uc" and parameter is not None and unicode_fallback_stack:
+            unicode_fallback_stack[-1] = min(max(parameter, 0), 255)
+        if word == "u" and parameter is not None:
+            if fldinst_stack and fldinst_stack[-1]:
+                unicode_value = parameter % 65536
+                field_text.append(unicode_value if 0x20 <= unicode_value <= 0x7E else 0x20)
+            fallback_count = unicode_fallback_stack[-1] if unicode_fallback_stack else 1
+            i = _skip_rtf_fallback(data, j, fallback_count)
+        elif word == "bin" and parameter is not None and parameter >= 0:
             if parameter > len(data) - j:
                 binary_truncated = True
                 break
             i = j + parameter
         else:
-            if fldinst_stack and fldinst_stack[-1] and word not in {"fldinst"}:
+            if fldinst_stack and fldinst_stack[-1] and word not in {"fldinst", "uc"}:
                 field_text.extend(b" ")
             i = j
         if scanned_control_count > MAX_RTF_CONTROL_WORDS:

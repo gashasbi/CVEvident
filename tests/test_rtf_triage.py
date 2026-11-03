@@ -36,6 +36,23 @@ class RtfTriageTests(unittest.TestCase):
         self.assertEqual(report["rtf_analysis"]["status"], "parsed")
         self.assertEqual(report["rtf_analysis"]["features"]["external_target_count"], 0)
 
+    def test_unicode_escaped_field_text_is_analyzed_and_fallback_is_skipped(self):
+        data = (
+            b'{\\rtf1\\uc2{\\field{\\*\\fldinst \\u72??YPERLINK '
+            b'"https://example.invalid/path"}}}'
+        )
+        report = self.analyze("unicode-field.rtf", data)
+        features = report["rtf_analysis"]["features"]
+        self.assertEqual(features["field_instruction_indicator_count"], 1)
+        self.assertEqual(features["external_target_count"], 1)
+
+        fallback_data = b'{\\rtf1{\\field{\\*\\fldinst \\u65DDEAUTO command}}}'
+        fallback_report = self.analyze("unicode-fallback.rtf", fallback_data)
+        self.assertEqual(
+            fallback_report["rtf_analysis"]["features"]["field_instruction_indicator_count"],
+            0,
+        )
+
     def test_bad_header_with_rtf_extension_is_failed(self):
         report = self.analyze("bad.rtf", b"plain text /object")
         self.assertEqual(report["rtf_analysis"]["status"], "failed")
