@@ -50,25 +50,36 @@ def _window_entropy(data: bytes, window_size: int = 4096) -> dict[str, float | i
     }
 
 
+def _pdf_hex_digit_pattern(value: int) -> bytes:
+    digit = format(value, "X").encode("ascii")
+    if value >= 10:
+        return b"[" + digit.lower() + digit.upper() + b"]"
+    return digit
+
+
+def _pdf_name_match_pattern(name: bytes) -> re.Pattern[bytes]:
+    parts = [re.escape(name[:1])]
+    for value in name[1:]:
+        escaped = b"#" + _pdf_hex_digit_pattern(value >> 4) + _pdf_hex_digit_pattern(value & 15)
+        parts.append(b"(?:" + re.escape(bytes((value,))) + b"|" + escaped + b")")
+    parts.append(rb"(?=$|[\x00\x09\x0a\x0c\x0d\x20\x28\x29<>\[\]{}/%])")
+    return re.compile(b"".join(parts))
+
+
 def _count_pdf_name(data: bytes, name: bytes) -> int:
-    # Avoid the /JS substring inside /JavaScript; PDF names end at a delimiter.
-    # This is still lexical scanning and does not decode escaped PDF names.
-    pattern = re.escape(name) + rb"(?=$|[\x00\x09\x0a\x0c\x0d\x20\x28\x29<>\[\]{}/%])"
-    return sum(1 for _ in re.finditer(pattern, data))
+    pattern = _pdf_name_match_pattern(name)
+    return sum(1 for _ in pattern.finditer(data))
 
 
 def _find_pdf_name_offsets(data: bytes, name: bytes, limit: int = 32) -> tuple[list[int], bool]:
-    """Return bounded zero-based offsets for raw lexical matches, never semantic claims."""
-    pattern = re.escape(name) + rb"(?=$|[\x00\x09\x0a\x0c\x0d\x20\x28\x29<>\[\]{}/%])"
     offsets: list[int] = []
     truncated = False
-    for match in re.finditer(pattern, data):
+    for match in _pdf_name_match_pattern(name).finditer(data):
         if len(offsets) >= limit:
             truncated = True
             break
         offsets.append(match.start())
     return offsets, truncated
-
 
 def analyze_pdf(path: str | Path, max_bytes: int = 100 * 1024 * 1024) -> dict[str, Any]:
     file_input = read_file(path, max_bytes=max_bytes)
@@ -184,7 +195,7 @@ def analyze_pdf(path: str | Path, max_bytes: int = 100 * 1024 * 1024) -> dict[st
 
     warnings = [
         "Static triage observations are not a malware verdict or proof of CVE exploitation.",
-        "Lexical marker counts may miss escaped or compressed names; structural parsing may also be incomplete.",
+        "Lexical marker counts may miss names in compressed or binary content; structural parsing may also be incomplete.",
         "Entropy describes byte distribution, not semantic similarity or maliciousness.",
         "The tool did not execute the file, its JavaScript, launch actions, links, or emulate a PDF reader.",
     ]

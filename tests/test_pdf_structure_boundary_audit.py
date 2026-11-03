@@ -421,7 +421,17 @@ def test_pdf_lexical_marker_count_respects_name_delimiters():
     assert javascript_offsets == [data.index(b"/JavaScript ")]
     assert javascript_truncated is False
 
-def test_escaped_pdf_name_is_recognized_structurally_when_lexical_scan_misses(
+def test_pdf_lexical_markers_decode_mixed_case_name_escapes():
+    from cvevident.pdf_triage import _count_pdf_name, _find_pdf_name_offsets
+
+    data = b"/#4aavaScript /Java#53cript /Java#53criptExtra /JavaScript#41"
+    assert _count_pdf_name(data, b"/JavaScript") == 2
+    offsets, truncated = _find_pdf_name_offsets(data, b"/JavaScript")
+    assert offsets == [data.index(b"/#4aavaScript"), data.index(b"/Java#53cript")]
+    assert truncated is False
+
+
+def test_escaped_pdf_name_is_recognized_lexically_and_structurally(
     tmp_path,
 ):
     writer = PdfWriter()
@@ -441,6 +451,12 @@ def test_escaped_pdf_name_is_recognized_structurally_when_lexical_scan_misses(
 
     report = analyze_pdf(path)
 
-    assert report["metrics"]["marker_counts"]["pdf.javascript_name"] == 0
+    assert report["metrics"]["marker_counts"]["pdf.javascript_name"] == 1
+    marker = next(
+        item for item in report["evidence"]
+        if item.get("evidence_type") == "pdf_lexical_marker"
+        and item.get("key") == "pdf.javascript_name"
+    )
+    assert marker["details"]["byte_offsets"] == [path.read_bytes().index(b"/Java#53cript")]
     assert report["structural_analysis"]["features"]["javascript_action_count"] == 1
     assert report["assessment"]["verdict"] == "not_assessed"
