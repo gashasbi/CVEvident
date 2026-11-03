@@ -437,3 +437,32 @@ def test_feature_assessments_distinguish_absent_from_unassessed() -> None:
         html = to_html(report)
         assert expected in markdown
         assert expected in html
+
+
+def test_unknown_parser_status_does_not_claim_complete_coverage_or_feature_absence() -> None:
+    report = _traceable_report()
+    report["warnings"] = []
+    report["structural_analysis"].update({
+        "status": "future_parser_status",
+        "truncated": False,
+        "findings_truncated": False,
+        "inventory_truncated": False,
+        "containers_inspected": 2,
+        "features": {"javascript_action_count": 0},
+        "warnings": [],
+    })
+
+    finalize_evidence_traceability(report)
+
+    coverage = report["analysis_coverage"]
+    assert coverage["complete_for_declared_static_scope"] is False
+    assert any(
+        "unrecognized status" in reason.lower()
+        for reason in coverage["limitation_reasons"]
+    )
+
+    assessment = next(
+        item for item in coverage["feature_assessments"]
+        if item["feature"] == "javascript_action_count"
+    )
+    assert assessment["status"] == "not_assessed"

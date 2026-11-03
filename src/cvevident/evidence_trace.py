@@ -495,7 +495,7 @@ def _feature_assessments(report: dict[str, Any]) -> list[dict[str, Any]]:
         if not isinstance(features, dict):
             continue
 
-        parser_status = str(parser.get("status", "unknown")).lower()
+        parser_status = str(parser.get("status") or "unknown").strip().lower()
         truncated = bool(
             parser.get("truncated")
             or parser.get("findings_truncated")
@@ -515,7 +515,11 @@ def _feature_assessments(report: dict[str, Any]) -> list[dict[str, Any]]:
                 status = "observed"
             elif value is None:
                 status = "not_assessed"
-            elif parser_status in hard_incomplete_statuses or inspected_count == 0:
+            elif (
+                parser_status in hard_incomplete_statuses
+                or parser_status not in {"parsed", "partial"}
+                or inspected_count == 0
+            ):
                 status = "not_assessed"
             elif parser_status == "partial" or truncated:
                 status = "not_found_in_inspected_scope"
@@ -635,7 +639,7 @@ def finalize_evidence_traceability(report: dict[str, Any]) -> None:
     )
     section_name = next((name for name in parser_sections if isinstance(report.get(name), dict)), None)
     parser_report = report.get(section_name, {}) if section_name else {}
-    parser_status = parser_report.get("status", "unknown")
+    parser_status = str(parser_report.get("status") or "unknown").strip().lower()
     truncated = bool(
         parser_report.get("truncated")
         or parser_report.get("findings_truncated")
@@ -662,9 +666,18 @@ def finalize_evidence_traceability(report: dict[str, Any]) -> None:
         if unknown_format_reason not in limitation_reasons:
             limitation_reasons.append(unknown_format_reason)
 
+    known_parser_statuses = incomplete_statuses | {"parsed"}
+    if parser_status not in known_parser_statuses:
+        status_reason = (
+            f"{section_name or 'Parser'} reported unrecognized status "
+            f"'{parser_status}'; analysis coverage is treated as incomplete."
+        )
+        if status_reason not in limitation_reasons:
+            limitation_reasons.append(status_reason)
+
     coverage_complete = (
         format_recognized
-        and parser_status not in incomplete_statuses
+        and parser_status == "parsed"
         and not truncated
     )
     feature_assessments = _feature_assessments(report)
