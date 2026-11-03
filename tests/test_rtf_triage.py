@@ -53,6 +53,29 @@ class RtfTriageTests(unittest.TestCase):
             0,
         )
 
+    def test_separate_field_instruction_groups_are_not_joined(self):
+        data = (
+            b'{\\rtf1\\ansi'
+            b'{\\field{\\*\\fldinst INCLUDE}{\\fldrslt first}}'
+            b'{\\field{\\*\\fldinst TEXT}{\\fldrslt second}}'
+            b'}'
+        )
+        report = self.analyze("separate-fields.rtf", data)
+        features = report["rtf_analysis"]["features"]
+        self.assertEqual(features["field_instruction_group_count"], 2)
+        self.assertEqual(features["field_instruction_indicator_count"], 0)
+
+    def test_nested_group_inside_one_field_instruction_remains_connected(self):
+        data = (
+            b'{\\rtf1\\ansi'
+            b'{\\field{\\*\\fldinst HYPER{LINK} "https://example.invalid/path"}'
+            b'{\\fldrslt click}}}'
+        )
+        report = self.analyze("nested-field.rtf", data)
+        features = report["rtf_analysis"]["features"]
+        self.assertEqual(features["field_instruction_indicator_count"], 1)
+        self.assertEqual(features["external_target_count"], 1)
+
     def test_bad_header_with_rtf_extension_is_failed(self):
         report = self.analyze("bad.rtf", b"plain text /object")
         self.assertEqual(report["rtf_analysis"]["status"], "failed")

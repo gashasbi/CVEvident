@@ -122,8 +122,11 @@ def _scan_rtf(data: bytes) -> dict[str, Any]:
                 negative_balance = True
             else:
                 depth -= 1
+            was_fldinst = bool(fldinst_stack and fldinst_stack[-1])
             if fldinst_stack:
                 fldinst_stack.pop()
+            if was_fldinst and not (fldinst_stack and fldinst_stack[-1]):
+                field_text.append(0x20)
             if unicode_fallback_stack:
                 unicode_fallback_stack.pop()
             i += 1
