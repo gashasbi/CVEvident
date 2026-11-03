@@ -455,9 +455,17 @@ def _evidence_limitations(
     section = _evidence_parser_section(item)
     parser = report.get(section) if section else None
     if isinstance(parser, dict):
-        status = str(parser.get("status", "unknown")).lower()
+        status = str(parser.get("status") or "unknown").strip().lower()
+        known_statuses = {
+            "parsed", "partial", "failed", "unavailable",
+            "unsupported", "unknown", "encrypted",
+        }
         if status in {"partial", "failed", "unavailable", "unsupported", "unknown", "encrypted"}:
             limitations.append(f"{section} reports parser status '{status}'.")
+        elif status not in known_statuses:
+            limitations.append(
+                f"{section} reports unrecognized parser status '{status}'."
+            )
         if (
             parser.get("truncated")
             or parser.get("findings_truncated")

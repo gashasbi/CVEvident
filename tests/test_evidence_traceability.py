@@ -466,3 +466,27 @@ def test_unknown_parser_status_does_not_claim_complete_coverage_or_feature_absen
         if item["feature"] == "javascript_action_count"
     )
     assert assessment["status"] == "not_assessed"
+
+
+def test_evidence_limitations_flag_unknown_parser_status() -> None:
+    report = _traceable_report()
+    report["structural_analysis"].update({
+        "status": " future_parser_status ",
+        "truncated": False,
+        "findings_truncated": False,
+        "inventory_truncated": False,
+        "warnings": [],
+    })
+
+    finalize_evidence_traceability(report)
+
+    evidence = next(
+        item for item in report["evidence"]
+        if item.get("evidence_type") == "pdf_structural_finding"
+    )
+    limitations = evidence["details"]["traceability"]["analysis_limitations"]
+
+    assert any(
+        "unrecognized parser status" in limitation.lower()
+        for limitation in limitations
+    )
