@@ -294,51 +294,6 @@ def test_traceability_exposes_method_value_and_consistent_feature_assessments() 
     assert "not_found_in_inspected_scope" in html
 
 
-def test_traceability_extraction_methods_match_the_actual_evidence_kind() -> None:
-    report = _traceable_report()
-    report["office_analysis"] = {
-        "status": "failed",
-        "truncated": False,
-        "features": {},
-        "warnings": [],
-    }
-    report["evidence"] = [
-        {
-            "evidence_type": "format_check",
-            "key": "office.extension_mismatch",
-            "value": True,
-            "severity": "info",
-            "details": {},
-        },
-        {
-            "evidence_type": "office_package_status",
-            "key": "office.package_status",
-            "value": "failed",
-            "severity": "warning",
-            "details": {},
-        },
-        {
-            "evidence_type": "file_identity",
-            "key": "sha256",
-            "value": "a" * 64,
-            "severity": "info",
-            "details": {"algorithm": "SHA-256"},
-        },
-    ]
-
-    finalize_evidence_traceability(report)
-    by_key = {item["key"]: item for item in report["evidence"]}
-
-    extension_trace = by_key["office.extension_mismatch"]["details"]["traceability"]
-    status_trace = by_key["office.package_status"]["details"]["traceability"]
-    identity_trace = by_key["sha256"]["details"]["traceability"]
-
-    assert extension_trace["extraction_method"] == "filename_extension_vs_detected_format_comparison"
-    assert status_trace["extraction_method"] == "parser_status_and_coverage_reporting"
-    assert any(
-        "file identity metadata" in limitation.lower()
-        for limitation in identity_trace["analysis_limitations"]
-    )
 
 
 def test_traceability_extraction_methods_match_the_actual_evidence_kind() -> None:
