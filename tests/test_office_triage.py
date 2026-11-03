@@ -214,6 +214,36 @@ class OfficeTriageTests(unittest.TestCase):
         features = report["office_analysis"]["features"]
         self.assertEqual(features["formula_network_function_count"], 1)
 
+    def test_detects_quoted_external_workbook_reference_with_spaces(self):
+        extras = {
+            "xl/worksheets/sheet1.xml": (
+                '<worksheet xmlns="urn:test:excel"><sheetData><row><c r="A1">'
+                "<f>'[Budget.xlsx]Annual Summary'!A1</f>"
+                '</c></row></sheetData></worksheet>'
+            ).encode(),
+        }
+        path = create_office_package(
+            self.root / "quoted-external-reference.xlsx", "xlsx", extras
+        )
+        report = analyze_office(str(path))
+        features = report["office_analysis"]["features"]
+        self.assertEqual(features["external_formula_reference_count"], 1)
+
+    def test_excel_structured_table_reference_is_not_external_workbook(self):
+        extras = {
+            "xl/worksheets/sheet1.xml": (
+                '<worksheet xmlns="urn:test:excel"><sheetData>'
+                '<row><c r="A1"><f>SUM(Table1[Amount])</f></c></row>'
+                '</sheetData></worksheet>'
+            ).encode(),
+        }
+        path = create_office_package(
+            self.root / "structured-reference.xlsx", "xlsx", extras
+        )
+        report = analyze_office(str(path))
+        features = report["office_analysis"]["features"]
+        self.assertEqual(features["external_formula_reference_count"], 0)
+
     def test_realistic_presentation_with_slide_content_type_is_parsed(self):
         # A normal PPTX manifest declares both presentation.xml and every slide part.
         # Slide content types are not competing package main parts; the root

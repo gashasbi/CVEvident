@@ -64,6 +64,10 @@ MAX_RELATIONSHIP_EXAMPLES = 25
 MAX_PART_EXAMPLES = 80
 
 _EXTERNAL_CONTENT_FUNCTIONS = re.compile(r"\b(?:WEBSERVICE|RTD|DDE|HYPERLINK|FILTERXML)\s*\(", re.I)
+_EXTERNAL_WORKBOOK_REFERENCE = re.compile(
+    r"(?:'[^']*\[[^\]]+\][^']*'|\[[^\]]+\][^!+\-*/(),;\s&^%=<>]*)!",
+    re.I,
+)
 _FIELD_INSTRUCTIONS = re.compile(r"\b(?:DDEAUTO|DDE|INCLUDETEXT|INCLUDEPICTURE|HYPERLINK)\b", re.I)
 
 
@@ -602,7 +606,7 @@ def analyze_office(
                     local == "definedname" and family == "excel" and info.filename == main_part
                 ):
                     formula = _safe_text(node.text, 2_000)
-                    if "[" in formula and "]" in formula:
+                    if _EXTERNAL_WORKBOOK_REFERENCE.search(formula):
                         features["external_formula_reference_count"] = int(features["external_formula_reference_count"]) + 1
                     if _EXTERNAL_CONTENT_FUNCTIONS.search(formula):
                         features["formula_network_function_count"] = int(features["formula_network_function_count"]) + 1
