@@ -51,7 +51,8 @@ def _base_report(file_input: Any, status: str, message: str, file_type: str = "u
             "status": status, "family": None, "format_id": None,
             "container_format": "OLE Compound File Binary (CFB)",
             "sector_size": None, "directory_entry_count": 0,
-            "stream_count": 0, "storage_count": 0, "truncated": False,
+            "stream_count": 0, "storage_count": 0,
+            "root_directory_entry_valid": None, "truncated": False,
             "features": {}, "directory_inventory": [], "warnings": [message],
         },
         "evidence": [
@@ -300,6 +301,78 @@ def analyze_legacy_office(path: str, max_bytes: int = 100 * 1024 * 1024) -> dict
     if parse_warnings:
         partial = True
 
+    root_entries = [entry for entry in entries if entry["type"] == "root_storage"]
+    root_entry_zero = next(
+        (entry for entry in entries if entry["index"] == 0),
+        None,
+    )
+    root_record_complete = len(directory_bytes) >= 128
+    root_is_first = (
+        root_record_complete
+        and root_entry_zero is not None
+        and root_entry_zero["type"] == "root_storage"
+        and root_entry_zero["name"] == "Root Entry"
+    )
+
+    if root_record_complete and (not root_is_first or len(root_entries) > 1):
+        message = (
+            "OLE/CFB directory does not contain exactly one required Root Entry "
+            "at directory entry zero."
+        )
+        report = _base_report(file_input, "failed", message)
+        analysis = report["legacy_office_analysis"]
+        analysis.update({
+            "directory_entry_count": len(entries),
+            "stream_count": sum(entry["type"] == "stream" for entry in entries),
+            "storage_count": sum(
+                entry["type"] in ("storage", "root_storage")
+                for entry in entries
+            ),
+            "root_directory_entry_valid": False,
+            "directory_chain_truncated": bool(chain_partial),
+            "truncated": bool(partial or entries_truncated or inventory_truncated),
+            "directory_inventory": entries[:_MAX_INVENTORY],
+            "warnings": list(dict.fromkeys([*warnings, message])),
+        })
+        report["warnings"] = list(dict.fromkeys([
+            *warnings,
+            message,
+            "Legacy Office analysis inspects bounded OLE/CFB header and directory metadata only; stream bodies and macros are not executed or extracted.",
+        ]))
+        return report
+
+    if not root_record_complete:
+        message = (
+            "OLE/CFB root directory entry could not be validated because "
+            "the directory stream ended before a complete first entry was available."
+        )
+        report = _base_report(file_input, "partial", message)
+        analysis = report["legacy_office_analysis"]
+        analysis.update({
+            "directory_entry_count": len(entries),
+            "stream_count": sum(entry["type"] == "stream" for entry in entries),
+            "storage_count": sum(
+                entry["type"] in ("storage", "root_storage")
+                for entry in entries
+            ),
+            "root_directory_entry_valid": None,
+            "directory_chain_truncated": bool(chain_partial),
+            "truncated": True,
+            "features": {
+                "directory_chain_truncated": bool(chain_partial),
+            },
+            "directory_inventory": entries[:_MAX_INVENTORY],
+            "warnings": list(dict.fromkeys([*warnings, message])),
+        })
+        report["warnings"] = list(dict.fromkeys([
+            *warnings,
+            message,
+            "Legacy Office analysis inspects bounded OLE/CFB header and directory metadata only; stream bodies and macros are not executed or extracted.",
+        ]))
+        return report
+
+    root_directory_entry_valid = None if chain_partial or entries_truncated else True
+
     names_lower = [entry["name"].casefold() for entry in entries]
     names = set(names_lower)
     if "worddocument" in names:
@@ -391,6 +464,7 @@ def analyze_legacy_office(path: str, max_bytes: int = 100 * 1024 * 1024) -> dict
             "mini_fat_sector_count_declared": num_mini_fat_sectors,
             "directory_entry_count": len(entries), "stream_count": len(stream_entries),
             "storage_count": len(storage_entries), "directory_chain_truncated": chain_partial,
+            "root_directory_entry_valid": root_directory_entry_valid,
             "truncated": bool(partial or entries_truncated or inventory_truncated),
             "macro_enabled_format": bool(vba_present), "vba_project_present": bool(vba_present),
             "encrypted_content_present": bool(encrypted_container),

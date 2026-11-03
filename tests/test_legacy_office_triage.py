@@ -82,6 +82,7 @@ class LegacyOfficeTests(unittest.TestCase):
         self.assertEqual(report["file"]["file_type"], "doc")
         self.assertEqual(report["legacy_office_analysis"]["family"], "word")
         self.assertEqual(report["legacy_office_analysis"]["status"], "parsed")
+        self.assertIs(report["legacy_office_analysis"]["root_directory_entry_valid"], True)
         self.assertTrue(report["legacy_office_analysis"]["vba_project_present"])
         self.assertEqual(report["assessment"]["verdict"], "not_assessed")
 
@@ -92,6 +93,53 @@ class LegacyOfficeTests(unittest.TestCase):
         self.assertEqual(power["legacy_office_analysis"]["family"], "powerpoint")
         self.assertEqual(excel["file"]["file_type"], "xls")
         self.assertEqual(power["file"]["file_type"], "ppt")
+
+    def test_requires_valid_root_directory_entry_before_detecting_office_family(self):
+        cases = [
+            ("missing-root", [("WordDocument", 2)]),
+            ("wrong-root-name", [("Invalid Root", 5), ("WordDocument", 2)]),
+            ("root-not-first", [("WordDocument", 2), ("Root Entry", 5)]),
+            ("multiple-roots", [
+                ("Root Entry", 5),
+                ("Another Root", 5),
+                ("WordDocument", 2),
+            ]),
+        ]
+
+        for case_name, entries in cases:
+            with self.subTest(case=case_name):
+                report = self.analyze(
+                    f"{case_name}.doc",
+                    build_cfb(entries),
+                )
+                analysis = report["legacy_office_analysis"]
+
+                self.assertEqual(analysis["status"], "failed")
+                self.assertIs(analysis["root_directory_entry_valid"], False)
+                self.assertIsNone(analysis["family"])
+                self.assertEqual(report["file"]["file_type"], "unknown_ole_cfb")
+                self.assertTrue(
+                    any("required Root Entry" in warning for warning in report["warnings"])
+                )
+
+    def test_incomplete_directory_does_not_claim_root_entry_invalid(self):
+        from unittest.mock import patch
+
+        data = build_cfb([
+            ("Root Entry", 5),
+            ("WordDocument", 2),
+        ])
+
+        with patch("cvevident.legacy_office_triage._MAX_DIRECTORY_BYTES", 64):
+            report = self.analyze("incomplete-root.doc", data)
+
+        analysis = report["legacy_office_analysis"]
+        self.assertEqual(analysis["status"], "partial")
+        self.assertIsNone(analysis["root_directory_entry_valid"])
+        self.assertTrue(analysis["truncated"])
+        self.assertTrue(
+            any("could not be validated" in warning for warning in analysis["warnings"])
+        )
 
     def test_wrong_extension_reports_family_mismatch(self):
         report = self.analyze("mistyped.xls", build_cfb([("Root Entry", 5), ("WordDocument", 2)]))
@@ -118,6 +166,7 @@ class LegacyOfficeTests(unittest.TestCase):
         struct.pack_into("<I", data, 1024, 0)
         report = self.analyze("cycle.doc", bytes(data))
         self.assertEqual(report["legacy_office_analysis"]["status"], "partial")
+        self.assertIsNone(report["legacy_office_analysis"]["root_directory_entry_valid"])
         self.assertTrue(any("cycle" in warning for warning in report["warnings"]))
 
     def test_directory_inventory_is_bounded(self):
