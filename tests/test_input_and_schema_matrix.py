@@ -46,11 +46,12 @@ def test_read_file_rejects_descriptor_that_changed_to_non_regular_file(
 ) -> None:
     target = tmp_path / "data.bin"
     target.write_bytes(b"data")
-    monkeypatch.setattr(file_input.os, "open", lambda *_args, **_kwargs: 12345)
-    monkeypatch.setattr(file_input.os, "fstat", lambda _fd: SimpleNamespace(st_mode=stat.S_IFIFO))
-    monkeypatch.setattr(file_input.os, "close", lambda _fd: None)
-    with pytest.raises(FileNotFoundError, match="changed to a non-regular file"):
-        file_input.read_file(target)
+    with monkeypatch.context() as patcher:
+        patcher.setattr(file_input.os, "open", lambda *_args, **_kwargs: 12345)
+        patcher.setattr(file_input.os, "fstat", lambda _fd: SimpleNamespace(st_mode=stat.S_IFIFO))
+        patcher.setattr(file_input.os, "close", lambda _fd: None)
+        with pytest.raises(FileNotFoundError, match="changed to a non-regular file"):
+            file_input.read_file(target)
 
 
 def test_read_file_wraps_read_errors_after_open(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -67,11 +68,12 @@ def test_read_file_wraps_read_errors_after_open(monkeypatch: pytest.MonkeyPatch,
         def read(self, _size):
             raise PermissionError("synthetic read denial")
 
-    monkeypatch.setattr(file_input.os, "open", lambda *_args, **_kwargs: 12345)
-    monkeypatch.setattr(file_input.os, "fstat", lambda _fd: SimpleNamespace(st_mode=stat.S_IFREG))
-    monkeypatch.setattr(file_input.os, "fdopen", lambda *_args, **_kwargs: FailingHandle())
-    with pytest.raises(OSError, match="Could not read input file: synthetic read denial"):
-        file_input.read_file(target)
+    with monkeypatch.context() as patcher:
+        patcher.setattr(file_input.os, "open", lambda *_args, **_kwargs: 12345)
+        patcher.setattr(file_input.os, "fstat", lambda _fd: SimpleNamespace(st_mode=stat.S_IFREG))
+        patcher.setattr(file_input.os, "fdopen", lambda *_args, **_kwargs: FailingHandle())
+        with pytest.raises(OSError, match="Could not read input file: synthetic read denial"):
+            file_input.read_file(target)
 
 
 def test_empty_entropy_window_and_bounded_lexical_offsets_are_explicit() -> None:
