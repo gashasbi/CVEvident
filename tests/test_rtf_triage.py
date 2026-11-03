@@ -64,6 +64,10 @@ class RtfTriageTests(unittest.TestCase):
         features = report["rtf_analysis"]["features"]
         self.assertEqual(features["field_instruction_group_count"], 2)
         self.assertEqual(features["field_instruction_indicator_count"], 0)
+        self.assertEqual(
+            report["rtf_analysis"]["field_instruction_examples"],
+            ["INCLUDE", "TEXT"],
+        )
 
     def test_nested_group_inside_one_field_instruction_remains_connected(self):
         data = (
@@ -75,6 +79,39 @@ class RtfTriageTests(unittest.TestCase):
         features = report["rtf_analysis"]["features"]
         self.assertEqual(features["field_instruction_indicator_count"], 1)
         self.assertEqual(features["external_target_count"], 1)
+
+    def test_rtf_field_detection_ignores_risk_words_in_arguments(self):
+        data = (
+            b'{\\rtf1\\ansi'
+            b'{\\field{\\*\\fldinst SYMBOL 163 \\f "DDE"}{\\fldrslt symbol}}'
+            b'{\\field{\\*\\fldinst HYPERLINK "https://example.invalid/DDEAUTO/link"}'
+            b'{\\fldrslt open}}}'
+        )
+        report = self.analyze("field-arguments.rtf", data)
+        features = report["rtf_analysis"]["features"]
+        self.assertEqual(features["field_instruction_indicator_count"], 1)
+        self.assertEqual(features["external_target_count"], 1)
+
+    def test_external_targets_in_separate_field_groups_are_counted_independently(self):
+        data = (
+            b'{\\rtf1\\ansi'
+            b'{\\field{\\*\\fldinst https://one.example/a}{\\fldrslt first}}'
+            b'{\\field{\\*\\fldinst https://two.example/b}{\\fldrslt second}}'
+            b'}'
+        )
+        report = self.analyze("separate-url-fields.rtf", data)
+        features = report["rtf_analysis"]["features"]
+        self.assertEqual(features["external_target_count"], 2)
+
+    def test_nested_fldinst_destination_does_not_double_count(self):
+        data = (
+            b'{\\rtf1\\ansi'
+            b'{\\field{\\*\\fldinst DDE {\\*\\fldinst DDEAUTO}}'
+            b'{\\fldrslt nested}}}'
+        )
+        report = self.analyze("nested-fldinst.rtf", data)
+        features = report["rtf_analysis"]["features"]
+        self.assertEqual(features["field_instruction_indicator_count"], 2)
 
     def test_bad_header_with_rtf_extension_is_failed(self):
         report = self.analyze("bad.rtf", b"plain text /object")

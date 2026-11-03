@@ -91,6 +91,28 @@ def _base_report(file_input: Any, status: str, message: str, file_type: str = "u
     }
 
 
+def _strip_rtf_field_argument_literals(instruction: bytes) -> bytes:
+    result = bytearray(instruction)
+    quoted = False
+    index = 0
+    while index < len(instruction):
+        if instruction[index] == 0x22:
+            if quoted and index + 1 < len(instruction) and instruction[index + 1] == 0x22:
+                result[index:index + 2] = b"  "
+                index += 2
+                continue
+            quoted = not quoted
+            result[index] = 0x20
+        elif quoted:
+            result[index] = 0x20
+        index += 1
+
+    masked = bytes(result)
+    for match in _URL_LITERAL.finditer(masked):
+        result[match.start():match.end()] = b" " * (match.end() - match.start())
+    return bytes(result)
+
+
 def _scan_rtf(data: bytes) -> dict[str, Any]:
     controls: Counter[str] = Counter()
     field_text = bytearray()
@@ -104,7 +126,9 @@ def _scan_rtf(data: bytes) -> dict[str, Any]:
     # Stack marks whether the current group is a \fldinst destination. A nested group
     # inherits that state; \fldinst changes the top group only.
     fldinst_stack: list[bool] = []
+    fldinst_start_stack: list[int | None] = []
     unicode_fallback_stack: list[int] = []
+    risk_word_count = 0
     while i < len(data):
         byte = data[i]
         if byte == 0x7B:  # {
@@ -114,6 +138,7 @@ def _scan_rtf(data: bytes) -> dict[str, Any]:
                 depth_limited = True
                 break
             fldinst_stack.append(fldinst_stack[-1] if fldinst_stack else False)
+            fldinst_start_stack.append(None)
             unicode_fallback_stack.append(unicode_fallback_stack[-1] if unicode_fallback_stack else 1)
             i += 1
             continue
@@ -123,10 +148,26 @@ def _scan_rtf(data: bytes) -> dict[str, Any]:
             else:
                 depth -= 1
             was_fldinst = bool(fldinst_stack and fldinst_stack[-1])
+            instruction_start = fldinst_start_stack.pop() if fldinst_start_stack else None
             if fldinst_stack:
                 fldinst_stack.pop()
-            if was_fldinst and not (fldinst_stack and fldinst_stack[-1]):
-                field_text.append(0x20)
+            if instruction_start is not None:
+                instruction = bytes(field_text[instruction_start:])
+                risk_word_count += sum(
+                    1
+                    for _ in _FIELD_RISK_WORDS.finditer(
+                        _strip_rtf_field_argument_literals(instruction)
+                    )
+                )
+            if instruction_start is not None or (
+                was_fldinst and not (fldinst_stack and fldinst_stack[-1])
+            ):
+                field_text.append(0x00)
+            if instruction_start is not None:
+                for parent_index in range(len(fldinst_stack) - 1, -1, -1):
+                    if fldinst_stack[parent_index] and fldinst_start_stack[parent_index] is None:
+                        fldinst_start_stack[parent_index] = len(field_text)
+                        break
             if unicode_fallback_stack:
                 unicode_fallback_stack.pop()
             i += 1
@@ -185,7 +226,21 @@ def _scan_rtf(data: bytes) -> dict[str, Any]:
         if word in _CONTROL_INDICATORS:
             controls[word] += 1
         if word == "fldinst" and fldinst_stack:
+            for parent_index in range(len(fldinst_start_stack) - 1, -1, -1):
+                parent_start = fldinst_start_stack[parent_index]
+                if parent_start is not None:
+                    instruction = bytes(field_text[parent_start:])
+                    risk_word_count += sum(
+                        1
+                        for _ in _FIELD_RISK_WORDS.finditer(
+                            _strip_rtf_field_argument_literals(instruction)
+                        )
+                    )
+                    fldinst_start_stack[parent_index] = None
+                    field_text.append(0x00)
+                    break
             fldinst_stack[-1] = True
+            fldinst_start_stack[-1] = len(field_text)
         if word == "uc" and parameter is not None and unicode_fallback_stack:
             unicode_fallback_stack[-1] = min(max(parameter, 0), 255)
         if word == "u" and parameter is not None:
@@ -206,9 +261,20 @@ def _scan_rtf(data: bytes) -> dict[str, Any]:
         if scanned_control_count > MAX_RTF_CONTROL_WORDS:
             break
 
+    active_instruction_start = next(
+        (start for start in fldinst_start_stack if start is not None),
+        None,
+    )
+    if active_instruction_start is not None:
+        instruction = bytes(field_text[active_instruction_start:])
+        risk_word_count += sum(
+            1
+            for _ in _FIELD_RISK_WORDS.finditer(
+                _strip_rtf_field_argument_literals(instruction)
+            )
+        )
     field_instructions = bytes(field_text)
-    risk_word_count = sum(1 for _ in _FIELD_RISK_WORDS.finditer(field_instructions))
-    url_count = sum(1 for _ in _URL_LITERAL.finditer(field_instructions))
+    url_count = sum(1 for _ in _URL_LITERAL.finditer(field_instructions.replace(b"\x00", b" ")))
     field_examples: list[str] = []
     segment_start = 0
     for separator in re.finditer(rb"[\r\n\x00]+", field_instructions):
