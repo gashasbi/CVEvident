@@ -151,6 +151,36 @@ class OfficeTriageTests(unittest.TestCase):
         report = analyze_office(str(path))
         self.assertEqual(report["office_analysis"]["features"]["field_instruction_count"], 0)
 
+    def test_detects_field_instruction_split_across_word_runs(self):
+        extras = {
+            "word/document.xml": (
+                '<w:document xmlns:w="urn:test:word"><w:body><w:p>'
+                '<w:r><w:fldChar w:fldCharType="begin"/></w:r>'
+                '<w:r><w:instrText>HYPER</w:instrText></w:r>'
+                '<w:r><w:instrText>LINK &quot;https://example.test/&quot;</w:instrText></w:r>'
+                '<w:r><w:fldChar w:fldCharType="separate"/></w:r>'
+                '<w:r><w:t>link</w:t></w:r>'
+                '<w:r><w:fldChar w:fldCharType="end"/></w:r>'
+                '</w:p></w:body></w:document>'
+            ).encode(),
+        }
+        path = create_office_package(self.root / "split-field.docx", "docx", extras)
+        report = analyze_office(str(path))
+        self.assertEqual(report["office_analysis"]["features"]["field_instruction_count"], 1)
+
+        extras["word/document.xml"] = (
+            '<w:document xmlns:w="urn:test:word"><w:body><w:p>'
+            '<w:r><w:fldChar w:fldCharType="begin"/></w:r>'
+            '<w:r><w:instrText>NUM</w:instrText></w:r>'
+            '<w:r><w:instrText>PAGES</w:instrText></w:r>'
+            '<w:r><w:fldChar w:fldCharType="separate"/></w:r>'
+            '<w:r><w:fldChar w:fldCharType="end"/></w:r>'
+            '</w:p></w:body></w:document>'
+        ).encode()
+        path = create_office_package(self.root / "ordinary-split-field.docx", "docx", extras)
+        report = analyze_office(str(path))
+        self.assertEqual(report["office_analysis"]["features"]["field_instruction_count"], 0)
+
     def test_detects_excel_external_formula_indicators(self):
         extras = {
             "xl/worksheets/sheet1.xml": (

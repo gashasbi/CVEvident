@@ -67,6 +67,35 @@ _EXTERNAL_CONTENT_FUNCTIONS = re.compile(r"\b(?:WEBSERVICE|RTD|DDE|HYPERLINK|FIL
 _FIELD_INSTRUCTIONS = re.compile(r"\b(?:DDEAUTO|DDE|INCLUDETEXT|INCLUDEPICTURE|HYPERLINK)\b", re.I)
 
 
+def _count_split_field_instructions(root: ElementTree.Element) -> int:
+    fields: list[dict[str, Any]] = []
+    count = 0
+    for node in root.iter():
+        local = _local_name(node.tag).casefold()
+        if local == "fldchar":
+            field_type = next(
+                (value.casefold() for key, value in node.attrib.items() if _local_name(key).casefold() == "fldchartype"),
+                "",
+            )
+            if field_type == "begin":
+                fields.append({"parts": [], "matched": False, "reading_instruction": True})
+            elif field_type in {"separate", "end"} and fields:
+                field = fields[-1]
+                if field["reading_instruction"]:
+                    instruction = "".join(field["parts"])
+                    if not field["matched"] and _FIELD_INSTRUCTIONS.search(instruction):
+                        count += 1
+                    field["reading_instruction"] = False
+                if field_type == "end":
+                    fields.pop()
+        elif local == "instrtext" and fields and fields[-1]["reading_instruction"]:
+            value = node.text or ""
+            fields[-1]["parts"].append(value)
+            if _FIELD_INSTRUCTIONS.search(value):
+                fields[-1]["matched"] = True
+    return count
+
+
 def _local_name(tag: str) -> str:
     return tag.rsplit("}", 1)[-1] if "}" in tag else tag
 
@@ -540,6 +569,7 @@ def analyze_office(
             is_relationship_part = info.filename.lower().endswith(".rels")
             source_part = _relationship_source(info.filename) if is_relationship_part else ""
             part_marker = f"/{info.filename.casefold()}"
+            features["field_instruction_count"] = int(features["field_instruction_count"]) + _count_split_field_instructions(root)
             for node in root.iter():
                 local = _local_name(node.tag).casefold()
                 if is_relationship_part and local == "relationship":
