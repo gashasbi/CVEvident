@@ -6,6 +6,7 @@ import pypdf
 import pytest
 from pypdf import PdfWriter
 from pypdf.generic import (
+    ArrayObject,
     DictionaryObject,
     IndirectObject,
     NameObject,
@@ -41,6 +42,41 @@ def write_pdf(writer):
     buffer = io.BytesIO()
     writer.write(buffer)
     return buffer.getvalue()
+
+
+@pytest.mark.parametrize("branch_kind", ["dictionary", "array"])
+def test_traversal_queue_capacity_accounts_for_already_pending_containers(
+    monkeypatch, branch_kind
+):
+    monkeypatch.setattr(pdf_structure, "_MAX_CONTAINERS", 10)
+
+    action = DictionaryObject({
+        NameObject("/S"): NameObject("/JavaScript")
+    })
+
+    if branch_kind == "dictionary":
+        branch = DictionaryObject({
+            NameObject("/NestedAction"): action
+        })
+    else:
+        branch = ArrayObject([action])
+
+    root = DictionaryObject({
+        NameObject("/Branch"): branch
+    })
+    for index in range(4):
+        root[NameObject(f"/Sibling{index}")] = DictionaryObject()
+
+    trailer = DictionaryObject({
+        NameObject("/Root"): root
+    })
+
+    result = analyze_fake_pdf(monkeypatch, trailer)
+
+    assert result["status"] == "parsed"
+    assert result["truncated"] is False
+    assert result["containers_inspected"] == 7
+    assert result["features"]["javascript_action_count"] == 1
 
 
 def test_encrypted_pdf_is_reported_without_object_graph_inspection():

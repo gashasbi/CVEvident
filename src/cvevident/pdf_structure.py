@@ -546,33 +546,25 @@ def analyze_pdf_structure(data: bytes, is_pdf: bool) -> dict[str, Any]:
 
                 # Only traverse object/container references. Strings and stream bytes are
                 # deliberately never decoded or interpreted as code.
-                remaining_capacity = _MAX_CONTAINERS - result["containers_inspected"] - len(stack)
-                if remaining_capacity <= 0:
-                    truncated = True
-                else:
-                    children = reversed(list(obj.items()))
-                    for key, child in children:
-                        if not isinstance(child, (DictionaryObject, ArrayObject, IndirectObject)):
-                            continue
-                        if len(stack) >= remaining_capacity:
-                            truncated = True
-                            break
-                        child_path, child_path_truncated = _join_object_path(object_path, str(key), path_truncated)
-                        stack.append((child, depth + 1, child_path, None, child_path_truncated))
+                children = reversed(list(obj.items()))
+                for key, child in children:
+                    if not isinstance(child, (DictionaryObject, ArrayObject, IndirectObject)):
+                        continue
+                    if len(stack) >= _MAX_CONTAINERS - result["containers_inspected"]:
+                        truncated = True
+                        break
+                    child_path, child_path_truncated = _join_object_path(object_path, str(key), path_truncated)
+                    stack.append((child, depth + 1, child_path, None, child_path_truncated))
             else:
-                remaining_capacity = _MAX_CONTAINERS - result["containers_inspected"] - len(stack)
-                if remaining_capacity <= 0:
-                    truncated = True
-                else:
-                    for index in range(len(obj) - 1, -1, -1):
-                        child = obj[index]
-                        if not isinstance(child, (DictionaryObject, ArrayObject, IndirectObject)):
-                            continue
-                        if len(stack) >= remaining_capacity:
-                            truncated = True
-                            break
-                        child_path, child_path_truncated = _join_object_path(object_path, f"[{index}]", path_truncated)
-                        stack.append((child, depth + 1, child_path, None, child_path_truncated))
+                for index in range(len(obj) - 1, -1, -1):
+                    child = obj[index]
+                    if not isinstance(child, (DictionaryObject, ArrayObject, IndirectObject)):
+                        continue
+                    if len(stack) >= _MAX_CONTAINERS - result["containers_inspected"]:
+                        truncated = True
+                        break
+                    child_path, child_path_truncated = _join_object_path(object_path, f"[{index}]", path_truncated)
+                    stack.append((child, depth + 1, child_path, None, child_path_truncated))
 
         for action, key in _ACTION_TYPES.items():
             features[key] = action_counts[action]
