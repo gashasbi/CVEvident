@@ -197,6 +197,23 @@ class OfficeTriageTests(unittest.TestCase):
         self.assertEqual(features["formula_network_function_count"], 1)
         self.assertEqual(features["external_link_part_count"], 1)
 
+    def test_detects_network_functions_in_excel_defined_names(self):
+        extras = {
+            "xl/workbook.xml": (
+                '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+                '<sheets/>'
+                '<definedNames>'
+                '<definedName name="ExternalLink">HYPERLINK("https://example.invalid/","open")</definedName>'
+                '<definedName name="Ordinary">SUM(Sheet1!A1:A2)</definedName>'
+                '</definedNames>'
+                '</workbook>'
+            ).encode(),
+        }
+        path = create_office_package(self.root / "defined-name.xlsx", "xlsx", extras)
+        report = analyze_office(str(path))
+        features = report["office_analysis"]["features"]
+        self.assertEqual(features["formula_network_function_count"], 1)
+
     def test_realistic_presentation_with_slide_content_type_is_parsed(self):
         # A normal PPTX manifest declares both presentation.xml and every slide part.
         # Slide content types are not competing package main parts; the root

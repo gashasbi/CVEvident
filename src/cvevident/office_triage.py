@@ -596,7 +596,11 @@ def analyze_office(
                 elif local in {"hyperlink", "hlinkclick", "hlinkmouseover"}:
                     # Word uses hyperlink; DrawingML uses hlinkClick/hlinkMouseOver.
                     features["hyperlink_element_count"] = int(features["hyperlink_element_count"]) + 1
-                elif local == "f" and "/worksheets/" in part_marker:
+                elif (
+                    local == "f" and "/worksheets/" in part_marker
+                ) or (
+                    local == "definedname" and family == "excel" and info.filename == main_part
+                ):
                     formula = _safe_text(node.text, 2_000)
                     if "[" in formula and "]" in formula:
                         features["external_formula_reference_count"] = int(features["external_formula_reference_count"]) + 1
@@ -660,8 +664,8 @@ def analyze_office(
             "activex_element_count": "Parsed XML contains ActiveX-related elements.",
             "altchunk_element_count": "Parsed Word XML contains altChunk elements that may refer to imported content.",
             "hyperlink_element_count": "Parsed XML contains hyperlink elements; targets were not opened.",
-            "external_formula_reference_count": "Parsed worksheet formulas contain bracketed external-workbook references.",
-            "formula_network_function_count": "Parsed worksheet formulas contain selected external/dynamic-data functions.",
+            "external_formula_reference_count": "Parsed worksheet formulas or Excel defined names contain bracketed external-workbook references.",
+            "formula_network_function_count": "Parsed worksheet formulas or Excel defined names contain selected external/dynamic-data functions.",
             "field_instruction_count": "Parsed Word field instructions contain link/import/DDE-related keywords.",
             "external_relationship_count": "Package relationships point to external targets; targets were not fetched.",
             "encrypted_member_count": "Package contains encrypted ZIP members that were not read.",
