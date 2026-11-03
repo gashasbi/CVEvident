@@ -59,6 +59,107 @@ class TestEocdSearchBoundaries:
     def test_rejects_data_without_any_eocd_signature(self):
         assert _find_eocd(b"not a ZIP archive") == -1
 
+    def test_accepts_self_extracting_prefix_archive(self):
+        prefix = b"MZ\\x90\\x00self-extracting-prefix"
+        data = prefix + make_zip(("sample.txt", b"sample"))
+
+        assert ensure_zip_entry_limit(data, max_entries=10) == 1
+
+        bounded, original_count, declared_bytes, truncated = bounded_zip_data(
+            data, max_entries=10
+        )
+        assert original_count == 1
+        assert declared_bytes == len(b"sample")
+        assert truncated is False
+        with zipfile.ZipFile(io.BytesIO(bounded), "r") as archive:
+            assert archive.namelist() == ["sample.txt"]
+            assert archive.read("sample.txt") == b"sample"
+
+    def test_rejects_fake_empty_eocd_when_outer_directory_is_corrupt(self):
+        fake_eocd = struct.pack("<4s4H2IH", EOCD, 0, 0, 0, 0, 0, 0, 0)
+        data = bytearray(make_zip(("sample.txt", b"sample"), comment=fake_eocd))
+        directory_start = data.find(CENTRAL)
+        assert directory_start >= 0
+        data[directory_start:directory_start + 4] = b"BAD!"
+
+        with pytest.raises(ValueError, match="central directory"):
+            ensure_zip_entry_limit(bytes(data), max_entries=10)
+
+    def test_rejects_fake_empty_eocd_when_outer_directory_offset_is_corrupt(self):
+        fake_eocd = struct.pack("<4s4H2IH", EOCD, 0, 0, 0, 0, 0, 0, 0)
+        data = bytearray(make_zip(("sample.txt", b"sample"), comment=fake_eocd))
+        actual_eocd = len(data) - len(fake_eocd) - 22
+        struct.pack_into("<I", data, actual_eocd + 16, 0xFFFFFFFE)
+
+        with pytest.raises(ValueError, match="central-directory offset|central-directory bounds"):
+            ensure_zip_entry_limit(bytes(data), max_entries=10)
+
+    def test_prefers_outer_archive_when_comment_length_is_corrupt(self):
+        fake_eocd = struct.pack("<4s4H2IH", EOCD, 0, 0, 0, 0, 0, 0, 0)
+        data = bytearray(make_zip(("sample.txt", b"sample"), comment=fake_eocd))
+        actual_eocd = len(data) - len(fake_eocd) - 22
+        struct.pack_into("<H", data, actual_eocd + 20, 0)
+
+        assert ensure_zip_entry_limit(bytes(data), max_entries=10) == 1
+
+        bounded, original_count, declared_bytes, truncated = bounded_zip_data(
+            bytes(data), max_entries=10
+        )
+        assert original_count == 1
+        assert declared_bytes == len(b"sample")
+        assert truncated is False
+        with zipfile.ZipFile(io.BytesIO(bounded), "r") as archive:
+            assert archive.namelist() == ["sample.txt"]
+            assert archive.read("sample.txt") == b"sample"
+
+    def test_rejects_fake_eocd_when_outer_bounds_and_comment_are_corrupt(self):
+        fake_eocd = struct.pack("<4s4H2IH", EOCD, 0, 0, 0, 0, 0, 0, 0)
+        data = bytearray(make_zip(("sample.txt", b"sample"), comment=fake_eocd))
+        actual_eocd = len(data) - len(fake_eocd) - 22
+        struct.pack_into("<I", data, actual_eocd + 12, 0xFFFFFFFE)
+        struct.pack_into("<H", data, actual_eocd + 20, 0)
+
+        with pytest.raises(ValueError, match="central-directory bounds|central directory|declared member count"):
+            ensure_zip_entry_limit(bytes(data), max_entries=10)
+
+    def test_preserves_outer_archive_when_comment_length_exceeds_file(self):
+        fake_eocd = struct.pack("<4s4H2IH", EOCD, 0, 0, 0, 0, 0, 0, 0)
+        data = bytearray(make_zip(("sample.txt", b"sample"), comment=fake_eocd))
+        actual_eocd = len(data) - len(fake_eocd) - 22
+        struct.pack_into("<H", data, actual_eocd + 20, 0xFFFF)
+
+        assert ensure_zip_entry_limit(bytes(data), max_entries=10) == 1
+
+        bounded, original_count, declared_bytes, truncated = bounded_zip_data(
+            bytes(data), max_entries=10
+        )
+        assert original_count == 1
+        assert declared_bytes == len(b"sample")
+        assert truncated is False
+        with zipfile.ZipFile(io.BytesIO(bounded), "r") as archive:
+            assert archive.namelist() == ["sample.txt"]
+            assert archive.read("sample.txt") == b"sample"
+
+    def test_skips_plausible_eocd_signature_at_end_of_archive_comment(self):
+        fake_eocd = struct.pack("<4s4H2IH", EOCD, 0, 0, 0, 0, 0, 0, 0)
+        data = make_zip(("sample.txt", b"sample"), comment=fake_eocd)
+
+        actual_eocd = len(data) - len(fake_eocd) - 22
+
+        assert _find_eocd(data) == actual_eocd
+        assert ensure_zip_entry_limit(data, max_entries=10) == 1
+
+        bounded, original_count, declared_bytes, truncated = bounded_zip_data(
+            data, max_entries=10
+        )
+        assert original_count == 1
+        assert declared_bytes == len(b"sample")
+        assert truncated is False
+        with zipfile.ZipFile(io.BytesIO(bounded), "r") as archive:
+            assert archive.namelist() == ["sample.txt"]
+            assert archive.read("sample.txt") == b"sample"
+
+
 
 class TestCentralDirectoryCorruptionBoundaries:
     def test_rejects_multidisk_eocd(self):

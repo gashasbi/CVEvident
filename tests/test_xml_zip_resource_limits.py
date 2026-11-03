@@ -68,6 +68,35 @@ def test_zip_preflight_rejects_corrupt_central_directory() -> None:
         ensure_zip_entry_limit(bytes(data), max_entries=10)
 
 
+def test_odf_probe_handles_eocd_signature_inside_archive_comment() -> None:
+    target = io.BytesIO()
+    fake_eocd = struct.pack("<4s4H2IH", b"PK" + bytes((5, 6)), 0, 0, 0, 0, 0, 0, 0)
+    with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_STORED) as archive:
+        archive.writestr("mimetype", b"application/vnd.oasis.opendocument.text")
+        archive.writestr("content.xml", b"<document-content/>")
+        archive.comment = fake_eocd
+
+    assert odf_triage.is_opendocument_package(target.getvalue()) is True
+
+
+def test_odf_probe_prefers_outer_package_over_zip_inside_comment() -> None:
+    inner = io.BytesIO()
+    with zipfile.ZipFile(inner, "w", compression=zipfile.ZIP_STORED) as archive:
+        archive.writestr("inner-one.txt", b"1")
+        archive.writestr("inner-two.txt", b"2")
+        archive.writestr("inner-three.txt", b"3")
+
+    target = io.BytesIO()
+    with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_STORED) as archive:
+        archive.writestr("mimetype", b"application/vnd.oasis.opendocument.text")
+        archive.writestr("content.xml", b"<document-content/>")
+        archive.comment = inner.getvalue()
+
+    data = target.getvalue()
+    assert ensure_zip_entry_limit(data, max_entries=10) == 2
+    assert odf_triage.is_opendocument_package(data) is True
+
+
 def test_odf_probe_preflights_entry_budget_before_opening_archive(monkeypatch) -> None:
     data = _zip_bytes([
         ("mimetype", b"application/vnd.oasis.opendocument.text"),

@@ -17,17 +17,145 @@ _ZIP64_SENTINEL_16 = 0xFFFF
 _ZIP64_SENTINEL_32 = 0xFFFFFFFF
 
 
+def _eocd_candidate_score(
+    data: bytes, eocd_pos: int
+) -> tuple[int, int, int] | None:
+    if eocd_pos < 0 or eocd_pos + _EOCD_MIN_SIZE > len(data):
+        return None
+
+    try:
+        disk_number, directory_disk, entries_on_disk, declared_entries = struct.unpack_from(
+            "<4H", data, eocd_pos + 4
+        )
+        directory_size, directory_offset = struct.unpack_from(
+            "<2I", data, eocd_pos + 12
+        )
+    except struct.error:
+        return None
+
+    uses_zip64 = (
+        entries_on_disk == _ZIP64_SENTINEL_16
+        or declared_entries == _ZIP64_SENTINEL_16
+        or directory_size == _ZIP64_SENTINEL_32
+        or directory_offset == _ZIP64_SENTINEL_32
+    )
+
+    if uses_zip64:
+        locator_pos = eocd_pos - 20
+        if locator_pos < 0 or data[locator_pos:locator_pos + 4] != _ZIP64_LOCATOR:
+            return None
+        try:
+            locator_disk = struct.unpack_from("<I", data, locator_pos + 4)[0]
+            zip64_offset = struct.unpack_from("<Q", data, locator_pos + 8)[0]
+            total_disks = struct.unpack_from("<I", data, locator_pos + 16)[0]
+            if locator_disk != 0 or total_disks != 1:
+                return None
+            if (
+                zip64_offset + 56 > locator_pos
+                or data[zip64_offset:zip64_offset + 4] != _ZIP64_EOCD
+            ):
+                return None
+            record_size = struct.unpack_from("<Q", data, zip64_offset + 4)[0]
+            if record_size < 44 or zip64_offset + 12 + record_size != locator_pos:
+                return None
+            z_disk, z_directory_disk = struct.unpack_from(
+                "<2I", data, zip64_offset + 16
+            )
+            entries_on_disk, declared_entries = struct.unpack_from(
+                "<2Q", data, zip64_offset + 24
+            )
+            directory_size, directory_offset = struct.unpack_from(
+                "<2Q", data, zip64_offset + 40
+            )
+        except struct.error:
+            return None
+        if (
+            z_disk != 0
+            or z_directory_disk != 0
+            or entries_on_disk != declared_entries
+        ):
+            return None
+        directory_end = zip64_offset
+    else:
+        if (
+            disk_number != 0
+            or directory_disk != 0
+            or entries_on_disk != declared_entries
+        ):
+            return None
+        directory_end = eocd_pos
+
+    directory_start = directory_end - directory_size
+    if directory_start < 0 or directory_end > len(data):
+        return None
+
+    has_central_header = int(
+        directory_size >= 46
+        and data[directory_start:directory_start + 4] == _CENTRAL_HEADER
+    )
+    offset_consistency = -abs(directory_start - directory_offset)
+    return has_central_header, offset_consistency, -eocd_pos
+
+
 def _find_eocd(data: bytes) -> int:
-    """Return the last plausible EOCD offset, or -1 if absent."""
+    """Return the outermost EOCD whose declared comment reaches EOF when present."""
     lower = max(0, len(data) - (_EOCD_MIN_SIZE + _MAX_ZIP_COMMENT))
     pos = data.rfind(_EOCD, lower)
+    candidates: list[int] = []
+    plausible: list[int] = []
+    exact_end: list[int] = []
+    validated: list[tuple[tuple[int, int, int], int]] = []
+
     while pos >= lower:
         if pos + _EOCD_MIN_SIZE <= len(data):
+            candidates.append(pos)
             comment_length = struct.unpack_from("<H", data, pos + 20)[0]
-            if pos + _EOCD_MIN_SIZE + comment_length <= len(data):
-                return pos
+            comment_end = pos + _EOCD_MIN_SIZE + comment_length
+            if comment_end <= len(data):
+                plausible.append(pos)
+                if comment_end == len(data):
+                    exact_end.append(pos)
+            score = _eocd_candidate_score(data, pos)
+            if score is not None:
+                validated.append((score, pos))
         pos = data.rfind(_EOCD, lower, pos)
-    return -1
+
+    if exact_end:
+        first_exact_end = min(exact_end)
+        earlier_validated = [
+            item for item in validated if item[1] < first_exact_end
+        ]
+        if earlier_validated:
+            return max(earlier_validated)[1]
+
+        entries_on_disk, declared_entries = struct.unpack_from(
+            "<2H", data, first_exact_end + 8
+        )
+        directory_size, directory_offset = struct.unpack_from(
+            "<2I", data, first_exact_end + 12
+        )
+        endpoint_claims_empty = not (
+            entries_on_disk or declared_entries or directory_size or directory_offset
+        )
+
+        if endpoint_claims_empty:
+            earlier_nonempty: list[int] = []
+            for candidate in candidates:
+                if candidate >= first_exact_end:
+                    continue
+                candidate_entries = struct.unpack_from("<2H", data, candidate + 8)
+                candidate_size, candidate_offset = struct.unpack_from(
+                    "<2I", data, candidate + 12
+                )
+                if any(candidate_entries) or candidate_size or candidate_offset:
+                    earlier_nonempty.append(candidate)
+            if earlier_nonempty:
+                return min(earlier_nonempty)
+
+        return first_exact_end
+    if validated:
+        return max(validated)[1]
+    return plausible[0] if plausible else -1
 
 
 def _zip64_uncompressed_size(extra: bytes) -> int:
@@ -125,6 +253,7 @@ def _scan_central_directory(data: bytes, max_entries: int) -> dict[str, int]:
     if cursor != directory_end:
         raise ValueError("ZIP central-directory size does not match its member records")
     return {
+        "eocd_pos": eocd_pos,
         "directory_start": directory_start,
         "directory_end": directory_end,
         "directory_offset": directory_offset,
@@ -166,7 +295,13 @@ def bounded_zip_data(
         raise ValueError("ZIP declared member count does not match the central directory")
     total_uncompressed = info["total_uncompressed_bytes"]
     if actual_entries <= max_entries:
-        return data, actual_entries, total_uncompressed, False
+        canonical_data = data
+        eocd_pos = info["eocd_pos"]
+        if data.rfind(_EOCD) > eocd_pos:
+            canonical = bytearray(data[:eocd_pos + _EOCD_MIN_SIZE])
+            struct.pack_into("<H", canonical, eocd_pos + 20, 0)
+            canonical_data = bytes(canonical)
+        return canonical_data, actual_entries, total_uncompressed, False
 
     # The project input-size budget keeps these offsets far below ZIP's 4 GiB
     # limit. Fail closed if this helper is called with a larger unsupported input.

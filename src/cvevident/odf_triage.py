@@ -12,7 +12,7 @@ from urllib.parse import urlsplit
 from xml.etree import ElementTree
 
 from .file_input import read_file
-from .archive_limits import bounded_zip_data, ensure_zip_entry_limit
+from .archive_limits import bounded_zip_data
 from .office_triage import (
     MAX_ARCHIVE_ENTRIES, MAX_COMPRESSION_RATIO, MAX_PART_EXAMPLES,
     MAX_TOTAL_UNCOMPRESSED_BYTES, MAX_TOTAL_XML_BYTES, MAX_XML_PART_BYTES,
@@ -69,8 +69,10 @@ def _strip_formula_string_literals(formula: str) -> str:
 def is_opendocument_package(data: bytes) -> bool:
     """Return True only when a ZIP has a recognized ODF mimetype part."""
     try:
-        ensure_zip_entry_limit(data, MAX_ARCHIVE_ENTRIES)
-        with zipfile.ZipFile(io.BytesIO(data), "r") as archive:
+        bounded_data, _, _, was_truncated = bounded_zip_data(data, MAX_ARCHIVE_ENTRIES)
+        if was_truncated:
+            return False
+        with zipfile.ZipFile(io.BytesIO(bounded_data), "r") as archive:
             infos = archive.infolist()
             if not infos or infos[0].filename != "mimetype":
                 # The package may still be malformed ODF, but do not classify it based
