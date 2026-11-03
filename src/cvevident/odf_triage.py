@@ -89,7 +89,10 @@ def _is_external_target(value: str) -> bool:
     target = value.strip()
     if not target or target.startswith(("#", "./", "../")):
         return False
-    parsed = urlsplit(target)
+    try:
+        parsed = urlsplit(target)
+    except ValueError:
+        return True
     return bool(parsed.scheme or parsed.netloc or target.startswith("//"))
 
 

@@ -150,6 +150,7 @@ class TestOdfTargetClassification:
             "//example.invalid/document.xml",
             "file:///tmp/document.xml",
             "smb://server/share/document.xml",
+            "http://[broken",
         ],
     )
     def test_absolute_external_targets_are_detected(self, target):
