@@ -168,6 +168,160 @@ class OfficeTriageTests(unittest.TestCase):
         self.assertTrue(any("not opened" in warning.lower() for warning in office["warnings"]))
 
 
+    def test_ole_object_metadata_is_linked_to_internal_embedded_part(self):
+        extras = {
+            "word/document.xml": (
+                '<w:document xmlns:w="urn:test:word" '
+                'xmlns:o="urn:test:office" '
+                'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+                '<w:body><w:object><o:OLEObject Type="Embed" ProgID="Package" '
+                'ShapeID="_x0000_i1025" DrawAspect="Content" ObjectID="_123456" '
+                'r:id="rIdEmb1"/></w:object></w:body></w:document>'
+            ).encode(),
+            "word/_rels/document.xml.rels": (
+                '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                '<Relationship Id="rIdEmb1" '
+                'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject" '
+                'Target="embeddings/oleObject1.bin"/>'
+                '</Relationships>'
+            ).encode(),
+            "word/embeddings/oleObject1.bin": b"static-ole-fixture",
+        }
+        path = create_office_package(
+            self.root / "ole-object-metadata.docm", "docm", extras
+        )
+        report = analyze_file(path)
+        office = report["office_analysis"]
+
+        references = office["ole_object_references"]
+        self.assertEqual(len(references), 1)
+        ole = references[0]
+        self.assertEqual(ole["source_part"], "word/document.xml")
+        self.assertEqual(ole["relationship_id"], "rIdEmb1")
+        self.assertEqual(ole["prog_id"], "Package")
+        self.assertEqual(ole["shape_id"], "_x0000_i1025")
+        self.assertEqual(ole["object_id"], "_123456")
+        self.assertEqual(ole["draw_aspect"], "Content")
+        self.assertEqual(ole["embedded_part"], "word/embeddings/oleObject1.bin")
+        self.assertTrue(ole["embedded_part_present"])
+        self.assertEqual(office["features"]["ole_object_element_count"], 1)
+        self.assertEqual(report["assessment"]["verdict"], "not_assessed")
+        ole_evidence = [
+            item for item in report["evidence"]
+            if item.get("evidence_type") == "office_ole_object_reference"
+        ]
+        self.assertEqual(len(ole_evidence), 1)
+        trace = ole_evidence[0]["details"]["traceability"]
+        self.assertEqual(ole_evidence[0]["details"]["object_type"], "Embed")
+        self.assertEqual(
+            trace["extraction_method"], "bounded_ooxml_zip_and_xml_inspection"
+        )
+        self.assertEqual(trace["observed_value"], "word/embeddings/oleObject1.bin")
+        self.assertEqual(trace["source_locator"]["kind"], "package_member_location")
+        self.assertEqual(
+            trace["source_locator"]["package_member"], "word/document.xml"
+        )
+        self.assertEqual(
+            trace["source_locator"]["relationship_type"],
+            "http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject",
+        )
+        self.assertEqual(trace["source_locator"]["relationship_id"], "rIdEmb1")
+        self.assertEqual(
+            trace["source_locator"]["target"],
+            "word/embeddings/oleObject1.bin",
+        )
+        self.assertEqual(trace["source_locator"]["element"], "OLEObject")
+
+    def test_ole_object_rejects_unrecognized_relationship_type_uri(self):
+        extras = {
+            "word/document.xml": (
+                '<w:document xmlns:w="urn:test:word" '
+                'xmlns:o="urn:test:office" '
+                'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+                '<w:body><w:object><o:OLEObject Type="Embed" '
+                'ProgID="Package" r:id="rIdForged"/></w:object></w:body></w:document>'
+            ).encode(),
+            "word/_rels/document.xml.rels": (
+                '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                '<Relationship Id="rIdForged" '
+                'Type="https://attacker.example/types/oleObject" '
+                'Target="embeddings/payload.bin"/>'
+                '</Relationships>'
+            ).encode(),
+            "word/embeddings/payload.bin": b"static-ole-fixture",
+        }
+        path = create_office_package(
+            self.root / "ole-forged-relationship.docm", "docm", extras
+        )
+        report = analyze_file(path)
+        references = report["office_analysis"]["ole_object_references"]
+
+        self.assertEqual(len(references), 1)
+        self.assertEqual(
+            references[0]["relationship_status"], "relationship_not_found"
+        )
+        self.assertIsNone(references[0]["embedded_part"])
+
+    def test_ole_object_links_fail_closed_for_ambiguous_missing_and_unsafe_targets(self):
+        extras = {
+            "word/document.xml": (
+                '<w:document xmlns:w="urn:test:word" '
+                'xmlns:o="urn:test:office" '
+                'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+                '<w:body>'
+                '<o:OLEObject ProgID="Unsafe" r:id="rUnsafe"/>'
+                '<o:OLEObject ProgID="Missing" r:id="rMissing"/>'
+                '<o:OLEObject ProgID="Ambiguous" r:id="rAmbiguous"/>'
+                '<o:OLEObject ProgID="NoRelationshipId"/>'
+                '</w:body></w:document>'
+            ).encode(),
+            "word/_rels/document.xml.rels": (
+                '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                '<Relationship Id="rUnsafe" '
+                'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject" '
+                'Target="%2e%2e/%2e%2e/outside.bin"/>'
+                '<Relationship Id="rMissing" '
+                'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject" '
+                'Target="embeddings/missing.bin"/>'
+                '<Relationship Id="rAmbiguous" '
+                'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject" '
+                'Target="embeddings/first.bin"/>'
+                '<Relationship Id="rAmbiguous" '
+                'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject" '
+                'Target="embeddings/second.bin"/>'
+                '</Relationships>'
+            ).encode(),
+        }
+        path = create_office_package(
+            self.root / "ole-object-invalid-links.docm", "docm", extras
+        )
+
+        report = analyze_file(path)
+        references = report["office_analysis"]["ole_object_references"]
+        by_id = {
+            item["relationship_id"]: item
+            for item in references
+            if item["relationship_id"]
+        }
+        missing_id = next(
+            item for item in references if not item["relationship_id"]
+        )
+
+        self.assertEqual(by_id["rUnsafe"]["relationship_status"], "unsafe_target")
+        self.assertIsNone(by_id["rUnsafe"]["embedded_part"])
+        self.assertEqual(
+            by_id["rMissing"]["relationship_status"], "embedded_part_missing"
+        )
+        self.assertFalse(by_id["rMissing"]["embedded_part_present"])
+        self.assertEqual(
+            by_id["rAmbiguous"]["relationship_status"], "ambiguous_relationship"
+        )
+        self.assertIsNone(by_id["rAmbiguous"]["embedded_part"])
+        self.assertEqual(
+            missing_id["relationship_status"], "missing_relationship_id"
+        )
+        self.assertEqual(report["assessment"]["verdict"], "not_assessed")
+
     def test_detects_drawingml_ole_and_hyperlink_elements(self):
         # PowerPoint/DrawingML uses the local names oleObj, hlinkClick, and
         # hlinkMouseOver (not the Word-specific names oleObject/hyperlink).

@@ -61,6 +61,12 @@ MAX_TOTAL_XML_BYTES = 32 * 1024 * 1024
 MAX_XML_PARTS = 300
 MAX_COMPRESSION_RATIO = 1_000
 MAX_RELATIONSHIP_EXAMPLES = 25
+MAX_OLE_OBJECT_REFERENCES = 25
+MAX_OLE_RELATIONSHIP_ENTRIES = 1_000
+OLE_OBJECT_RELATIONSHIP_TYPES = frozenset({
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject",
+    "http://purl.oclc.org/ooxml/officeDocument/relationships/oleObject",
+})
 MAX_PART_EXAMPLES = 80
 
 _EXTERNAL_CONTENT_FUNCTIONS = re.compile(r"\b(?:WEBSERVICE|RTD|DDE|HYPERLINK|FILTERXML)\s*\(", re.I)
@@ -228,6 +234,51 @@ def _resolve_package_relationship_target(target: str) -> str | None:
     if not segments or any(segment in {"", ".", ".."} for segment in segments):
         return None
     return "/".join(segments)
+
+
+def _xml_attribute_by_local_name(
+    node: ElementTree.Element, name: str, limit: int = 240
+) -> str:
+    expected = name.casefold()
+    for key, value in node.attrib.items():
+        if _local_name(key).casefold() == expected:
+            return _safe_text(value, limit)
+    return ""
+
+
+def _resolve_internal_relationship_target(
+    source_part: str, target: str
+) -> str | None:
+    try:
+        parsed = urlsplit(target)
+    except ValueError:
+        return None
+    if parsed.scheme or parsed.netloc or parsed.query or parsed.fragment:
+        return None
+
+    path = unquote(parsed.path)
+    if not path or "\\" in path or "\x00" in path:
+        return None
+    if any(ord(char) < 32 for char in path):
+        return None
+
+    root_relative = path.startswith("/")
+    segments = path.lstrip("/").split("/")
+    if not segments or any(segment in {"", "."} for segment in segments):
+        return None
+
+    resolved = [] if root_relative else list(PurePosixPath(source_part).parent.parts)
+    for segment in segments:
+        if segment == "..":
+            if not resolved:
+                return None
+            resolved.pop()
+        else:
+            resolved.append(segment)
+
+    if not resolved or any(segment in {"", ".", ".."} for segment in resolved):
+        return None
+    return "/".join(resolved)
 
 
 def _parse_xml(data: bytes) -> ElementTree.Element:
@@ -628,7 +679,12 @@ def analyze_office(
             "unsafe_member_name_count": len(unsafe_names),
             "duplicate_member_name_count": len(duplicate_names),
         }
-        relationships: list[dict[str, str]] = []
+        relationships: list[dict[str, Any]] = []
+        ole_object_candidates: list[dict[str, str]] = []
+        ole_relationships: dict[tuple[str, str], list[dict[str, str]]] = {}
+        ole_relationship_entries_seen = 0
+        ole_object_references_truncated = False
+        ole_relationships_truncated = False
         inspected_part_names: list[str] = []
         for info in xml_infos:
             if info.filename in duplicate_names or info.filename in unsafe_names or info.filename in encrypted_names:
@@ -663,6 +719,27 @@ def analyze_office(
                 local = _local_name(node.tag).casefold()
                 if is_relationship_part and local == "relationship":
                     target_mode = node.attrib.get("TargetMode", "")
+                    relationship_type = _safe_text(node.attrib.get("Type", ""), 240)
+                    relationship_id = _xml_attribute_by_local_name(node, "Id", 240)
+                    target = _safe_text(node.attrib.get("Target", ""), 500)
+                    if relationship_type in OLE_OBJECT_RELATIONSHIP_TYPES:
+                        if ole_relationship_entries_seen < MAX_OLE_RELATIONSHIP_ENTRIES:
+                            if relationship_id:
+                                ole_relationships.setdefault(
+                                    (source_part, relationship_id), []
+                                ).append({
+                                    "source_part": _safe_text(source_part, 300),
+                                    "source_relationship_part": _safe_text(info.filename, 300),
+                                    "relationship_id": relationship_id,
+                                    "relationship_type": relationship_type,
+                                    "target": target,
+                                    "target_mode": target_mode,
+                                })
+                            ole_relationship_entries_seen += 1
+                        else:
+                            if not ole_relationships_truncated:
+                                ole_relationships_truncated = True
+                                partial = True
                     if target_mode.casefold() == "external":
                         features["external_relationship_count"] = int(features["external_relationship_count"]) + 1
                         if len(relationships) < MAX_RELATIONSHIP_EXAMPLES:
@@ -681,6 +758,20 @@ def analyze_office(
                 if local in {"oleobject", "oleobj"}:
                     # OOXML commonly spells the DrawingML element as oleObj;
                     # older/alternate markup can use OLEObject.
+                    if len(ole_object_candidates) < MAX_OLE_OBJECT_REFERENCES:
+                        ole_object_candidates.append({
+                            "source_part": _safe_text(info.filename, 300),
+                            "element": _safe_text(_local_name(node.tag), 80),
+                            "relationship_id": _xml_attribute_by_local_name(node, "id", 240),
+                            "object_type": _xml_attribute_by_local_name(node, "Type", 80),
+                            "prog_id": _xml_attribute_by_local_name(node, "ProgID", 160),
+                            "shape_id": _xml_attribute_by_local_name(node, "ShapeID", 120),
+                            "object_id": _xml_attribute_by_local_name(node, "ObjectID", 120),
+                            "draw_aspect": _xml_attribute_by_local_name(node, "DrawAspect", 80),
+                        })
+                    elif not ole_object_references_truncated:
+                        ole_object_references_truncated = True
+                        partial = True
                     features["ole_object_element_count"] = int(features["ole_object_element_count"]) + 1
                 elif local in {"activex", "activexcontrol"}:
                     features["activex_element_count"] = int(features["activex_element_count"]) + 1
@@ -709,6 +800,87 @@ def analyze_office(
                     if _FIELD_INSTRUCTIONS.search(instruction):
                         features["field_instruction_count"] = int(features["field_instruction_count"]) + 1
             del root
+
+        ole_object_references: list[dict[str, Any]] = []
+        unresolved_ole_references = False
+        for observed in ole_object_candidates:
+            reference: dict[str, Any] = dict(observed)
+            reference.update({
+                "relationship_part": None,
+                "relationship_type": None,
+                "relationship_target": None,
+                "relationship_target_mode": None,
+                "relationship_status": "relationship_not_found",
+                "target_kind": None,
+                "target_scheme": None,
+                "embedded_part": None,
+                "embedded_part_present": False,
+            })
+
+            relationship_id = observed["relationship_id"]
+            matches = (
+                ole_relationships.get((observed["source_part"], relationship_id), [])
+                if relationship_id else []
+            )
+
+            if not relationship_id:
+                reference["relationship_status"] = "missing_relationship_id"
+            elif len(matches) > 1:
+                reference["relationship_status"] = "ambiguous_relationship"
+            elif len(matches) == 1:
+                relationship = matches[0]
+                target = relationship["target"]
+                target_mode = relationship["target_mode"]
+                reference.update({
+                    "relationship_part": relationship["source_relationship_part"],
+                    "relationship_type": relationship["relationship_type"],
+                    "relationship_target": target,
+                    "relationship_target_mode": target_mode or "Internal",
+                })
+
+                if target_mode.casefold() == "external":
+                    target_kind, target_scheme = _classify_external_target(target)
+                    reference.update({
+                        "relationship_status": "external_target",
+                        "target_kind": target_kind,
+                        "target_scheme": target_scheme,
+                    })
+                else:
+                    embedded_part = _resolve_internal_relationship_target(
+                        observed["source_part"], target
+                    )
+                    if embedded_part is None:
+                        reference.update({
+                            "relationship_status": "unsafe_target",
+                            "target_kind": "invalid_package_target",
+                        })
+                    else:
+                        part_present = embedded_part in info_by_name
+                        reference.update({
+                            "relationship_status": (
+                                "linked" if part_present else "embedded_part_missing"
+                            ),
+                            "target_kind": "package_part",
+                            "embedded_part": embedded_part,
+                            "embedded_part_present": part_present,
+                        })
+
+            if reference["relationship_status"] not in {"linked", "external_target"}:
+                unresolved_ole_references = True
+            ole_object_references.append(reference)
+
+        if ole_object_references_truncated:
+            warnings.append(
+                f"OLE-object reference inventory was capped at {MAX_OLE_OBJECT_REFERENCES} entries."
+            )
+        if ole_relationships_truncated:
+            warnings.append(
+                f"Internal OLE relationship inventory was capped at {MAX_OLE_RELATIONSHIP_ENTRIES} entries."
+            )
+        if unresolved_ole_references:
+            warnings.append(
+                "Some OLE-object references could not be linked unambiguously to a package relationship."
+            )
 
         package_status = "partial" if partial else "parsed"
         warnings.append("Office structure and relationships are contextual observations; they are not a malware verdict.")
@@ -818,6 +990,9 @@ def analyze_office(
                 "extension_matches_detected_format": extension_matches,
                 "features": features,
                 "external_relationships": relationships,
+                "ole_object_references": ole_object_references,
+                "ole_object_references_truncated": ole_object_references_truncated,
+                "ole_relationship_inventory_truncated": ole_relationships_truncated,
                 "parts_inventory": inspected_part_names[:MAX_PART_EXAMPLES],
                 "warnings": list(dict.fromkeys(warnings)),
             },

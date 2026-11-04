@@ -81,6 +81,23 @@ def to_markdown(report: dict[str, Any]) -> str:
                 ]
                 cells = [cell.replace("|", "\\|") for cell in cells]
                 lines.append("| " + " | ".join(cells) + " |")
+        ole_references = office.get("ole_object_references", [])
+        if ole_references:
+            lines += [
+                "", "### OLE object references (payload bytes not read)", "",
+                "| Source part | Relationship ID | ProgID | Relationship status | Embedded package part |",
+                "|---|---|---|---|---|",
+            ]
+            for reference in ole_references[:25]:
+                cells = [
+                    _report_single_line(reference.get("source_part", "")),
+                    _report_single_line(reference.get("relationship_id", "")),
+                    _report_single_line(reference.get("prog_id", "")),
+                    _report_single_line(reference.get("relationship_status", "unknown")),
+                    _report_single_line(reference.get("embedded_part", "")),
+                ]
+                cells = [cell.replace("|", "\\|") for cell in cells]
+                lines.append("| " + " | ".join(cells) + " |")
         parts = office.get("parts_inventory", [])
         if parts:
             lines += ["", "### XML parts inspected", ""]
