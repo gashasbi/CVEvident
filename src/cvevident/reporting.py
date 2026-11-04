@@ -84,9 +84,9 @@ def to_markdown(report: dict[str, Any]) -> str:
         ole_references = office.get("ole_object_references", [])
         if ole_references:
             lines += [
-                "", "### OLE object references (payload bytes not read)", "",
-                "| Source part | Relationship ID | ProgID | Relationship status | Embedded package part |",
-                "|---|---|---|---|---|",
+                "", "### OLE object references (bounded payload signature inspection)", "",
+                "| Source part | Relationship ID | ProgID | Relationship status | Embedded package part | Embedded content status | Skip reason | Embedded content kind | Embedded content signature | Bytes inspected |",
+                "|---|---|---|---|---|---|---|---|---|---|",
             ]
             for reference in ole_references[:25]:
                 cells = [
@@ -95,6 +95,11 @@ def to_markdown(report: dict[str, Any]) -> str:
                     _report_single_line(reference.get("prog_id", "")),
                     _report_single_line(reference.get("relationship_status", "unknown")),
                     _report_single_line(reference.get("embedded_part", "")),
+                    _report_single_line(reference.get("embedded_content_status", "not_inspected")),
+                    _report_single_line(reference.get("embedded_content_skip_reason") or "—"),
+                    _report_single_line(reference.get("embedded_content_kind") or "—"),
+                    _report_single_line(reference.get("embedded_content_signature") or "—"),
+                    str(reference.get("embedded_content_bytes_inspected", 0)),
                 ]
                 cells = [cell.replace("|", "\\|") for cell in cells]
                 lines.append("| " + " | ".join(cells) + " |")

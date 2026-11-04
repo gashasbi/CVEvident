@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import struct
 import tempfile
+import warnings
 import unittest
 import zipfile
 from pathlib import Path
 
 from cvevident.analyzer import analyze_file
 from cvevident.cli import main
-from cvevident.office_triage import MAIN_CONTENT_TYPES, OFFICE_EXTENSIONS, analyze_office
+from cvevident.office_triage import MAX_COMPRESSION_RATIO, MAIN_CONTENT_TYPES, OFFICE_EXTENSIONS, analyze_office
 from cvevident.db import init_db
 from cvevident.reporting import to_html, to_markdown
 from cvevident.store import get_analysis
@@ -231,6 +233,402 @@ class OfficeTriageTests(unittest.TestCase):
             "word/embeddings/oleObject1.bin",
         )
         self.assertEqual(trace["source_locator"]["element"], "OLEObject")
+
+    def test_ole_embedded_payload_signatures_are_identified_with_bounded_reads(self):
+        signatures = [
+            (b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1", "ole_cfb", "cfb_header"),
+            (b"%PDF-1.7\n", "pdf", "pdf_header"),
+            (b"PK\x03\x04", "zip", "zip_local_file_header"),
+            (b"PK\x05\x06", "zip", "zip_empty_archive"),
+            (b"PK\x07\x08", "zip", "zip_spanned_archive"),
+            (b"{\\rtf1", "rtf", "rtf_header"),
+            (b"MZ", "mz_executable", "mz_header"),
+            (b"\x7fELF", "elf_binary", "elf_header"),
+            (b"MSCF", "cab_archive", "cab_header"),
+            (b"\x1f\x8b", "gzip", "gzip_header"),
+            (b"7z\xbc\xaf\x27\x1c", "7z", "7z_header"),
+            (b"Rar!\x1a\x07\x00", "rar", "rar4_header"),
+            (b"Rar!\x1a\x07\x01\x00", "rar", "rar5_header"),
+        ]
+
+        for index, (header, expected_kind, expected_signature) in enumerate(signatures):
+            with self.subTest(kind=expected_kind, signature=expected_signature):
+                payload = header + (b"X" * 128)
+                relationship_id = f"rIdSignature{index}"
+                extras = {
+                    "word/document.xml": (
+                        '<w:document xmlns:w="urn:test:word" '
+                        'xmlns:o="urn:test:office" '
+                        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+                        f'<w:body><w:object><o:OLEObject Type="Embed" r:id="{relationship_id}"/>'
+                        '</w:object></w:body></w:document>'
+                    ).encode(),
+                    "word/_rels/document.xml.rels": (
+                        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                        f'<Relationship Id="{relationship_id}" '
+                        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject" '
+                        f'Target="embeddings/payload{index}.bin"/>'
+                        '</Relationships>'
+                    ).encode(),
+                    f"word/embeddings/payload{index}.bin": payload,
+                }
+                path = create_office_package(
+                    self.root / f"ole-signature-{index}.docx", "docx", extras
+                )
+                report = analyze_file(path)
+                ole = report["office_analysis"]["ole_object_references"][0]
+
+                self.assertEqual(ole["embedded_content_status"], "identified")
+                self.assertEqual(ole["embedded_content_kind"], expected_kind)
+                self.assertEqual(
+                    ole["embedded_content_signature"], expected_signature
+                )
+                self.assertEqual(
+                    ole["embedded_content_bytes_inspected"], 64
+                )
+
+    def test_ole_embedded_payload_with_unknown_signature_is_not_misclassified(self):
+        payload = b"UNKNOWN-CONTENT-" + (b"X" * 128)
+        extras = {
+            "word/document.xml": (
+                '<w:document xmlns:w="urn:test:word" '
+                'xmlns:o="urn:test:office" '
+                'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+                '<w:body><w:object><o:OLEObject Type="Embed" r:id="rIdUnknown"/>'
+                '</w:object></w:body></w:document>'
+            ).encode(),
+            "word/_rels/document.xml.rels": (
+                '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                '<Relationship Id="rIdUnknown" '
+                'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject" '
+                'Target="embeddings/unknown.bin"/>'
+                '</Relationships>'
+            ).encode(),
+            "word/embeddings/unknown.bin": payload,
+        }
+        path = create_office_package(
+            self.root / "ole-unknown-payload.docx", "docx", extras
+        )
+        report = analyze_file(path)
+        ole = report["office_analysis"]["ole_object_references"][0]
+
+        self.assertEqual(ole["embedded_content_status"], "unrecognized")
+        self.assertIsNone(ole["embedded_content_kind"])
+        self.assertIsNone(ole["embedded_content_signature"])
+        self.assertEqual(ole["embedded_content_bytes_inspected"], 64)
+        self.assertEqual(report["assessment"]["verdict"], "not_assessed")
+
+    def test_ole_duplicate_embedded_member_is_reported_as_ambiguous(self):
+        member_name = "word/embeddings/duplicate.bin"
+        extras = {
+            "word/document.xml": (
+                '<w:document xmlns:w="urn:test:word" '
+                'xmlns:o="urn:test:office" '
+                'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+                '<w:body><w:object><o:OLEObject Type="Embed" r:id="rIdDuplicate"/>'
+                '</w:object></w:body></w:document>'
+            ).encode(),
+            "word/_rels/document.xml.rels": (
+                '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                '<Relationship Id="rIdDuplicate" '
+                'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject" '
+                'Target="embeddings/duplicate.bin"/>'
+                '</Relationships>'
+            ).encode(),
+            member_name: b"%PDF-1.7\\nfirst-payload",
+        }
+        path = create_office_package(
+            self.root / "ole-duplicate-member.docx", "docx", extras
+        )
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            with zipfile.ZipFile(path, "a") as archive:
+                archive.writestr(member_name, b"%PDF-1.7\\nsecond-payload")
+
+        report = analyze_file(path)
+        ole = report["office_analysis"]["ole_object_references"][0]
+
+        self.assertEqual(ole["relationship_status"], "ambiguous_embedded_part")
+        self.assertTrue(ole["embedded_part_present"])
+        self.assertTrue(ole["embedded_part_ambiguous"])
+        self.assertEqual(ole["embedded_content_status"], "not_inspected")
+        self.assertEqual(ole["embedded_content_bytes_inspected"], 0)
+        self.assertIsNone(ole["embedded_content_kind"])
+
+        ole_evidence = [
+            item for item in report["evidence"]
+            if item.get("evidence_type") == "office_ole_object_reference"
+        ]
+        self.assertEqual(len(ole_evidence), 1)
+        details = ole_evidence[0]["details"]
+        self.assertTrue(details["embedded_part_present"])
+        self.assertTrue(details["embedded_part_ambiguous"])
+        self.assertEqual(
+            details["relationship_status"], "ambiguous_embedded_part"
+        )
+
+        markdown = to_markdown(report)
+        self.assertIn("ambiguous_embedded_part", markdown)
+        html = to_html(report)
+        self.assertIn("ambiguous_embedded_part", html)
+
+        self.assertEqual(report["office_analysis"]["status"], "partial")
+        self.assertEqual(report["assessment"]["verdict"], "not_assessed")
+
+    def test_ole_encrypted_embedded_member_is_not_reported_missing(self):
+        member_name = "word/embeddings/encrypted.bin"
+        extras = {
+            "word/document.xml": (
+                '<w:document xmlns:w="urn:test:word" '
+                'xmlns:o="urn:test:office" '
+                'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+                '<w:body><w:object><o:OLEObject Type="Embed" r:id="rIdEncrypted"/>'
+                '</w:object></w:body></w:document>'
+            ).encode(),
+            "word/_rels/document.xml.rels": (
+                '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                '<Relationship Id="rIdEncrypted" '
+                'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject" '
+                'Target="embeddings/encrypted.bin"/>'
+                '</Relationships>'
+            ).encode(),
+            member_name: b"%PDF-1.7\\nstatic-encrypted-fixture",
+        }
+        path = create_office_package(
+            self.root / "ole-encrypted-member.docx", "docx", extras
+        )
+
+        raw = bytearray(path.read_bytes())
+        with zipfile.ZipFile(path, "r") as archive:
+            info = archive.getinfo(member_name)
+            local_offset = info.header_offset
+            local_flags = struct.unpack_from("<H", raw, local_offset + 6)[0]
+            struct.pack_into("<H", raw, local_offset + 6, local_flags | 0x1)
+
+            position = archive.start_dir
+            target_name = member_name.encode()
+            central_found = False
+            while position < len(raw):
+                if raw[position:position + 4] != b"PK\x01\x02":
+                    break
+                filename_length, extra_length, comment_length = struct.unpack_from(
+                    "<HHH", raw, position + 28
+                )
+                filename_start = position + 46
+                filename = bytes(raw[filename_start:filename_start + filename_length])
+                if filename == target_name:
+                    central_flags = struct.unpack_from("<H", raw, position + 8)[0]
+                    struct.pack_into("<H", raw, position + 8, central_flags | 0x1)
+                    central_found = True
+                    break
+                position += 46 + filename_length + extra_length + comment_length
+
+        self.assertTrue(central_found)
+        path.write_bytes(raw)
+
+        report = analyze_file(path)
+        ole = report["office_analysis"]["ole_object_references"][0]
+
+        self.assertEqual(ole["relationship_status"], "linked")
+        self.assertTrue(ole["embedded_part_present"])
+        self.assertEqual(
+            ole["embedded_content_status"], "skipped_encrypted"
+        )
+        self.assertEqual(
+            ole["embedded_content_skip_reason"], "encrypted_member"
+        )
+        self.assertEqual(ole["embedded_content_bytes_inspected"], 0)
+        self.assertEqual(report["office_analysis"]["status"], "partial")
+        self.assertEqual(report["assessment"]["verdict"], "not_assessed")
+
+    def test_ole_embedded_member_with_unsupported_compression_is_skipped(self):
+        member_name = "word/embeddings/unsupported.bin"
+        extras = {
+            "word/document.xml": (
+                '<w:document xmlns:w="urn:test:word" '
+                'xmlns:o="urn:test:office" '
+                'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+                '<w:body><w:object><o:OLEObject Type="Embed" r:id="rIdUnsupported"/>'
+                '</w:object></w:body></w:document>'
+            ).encode(),
+            "word/_rels/document.xml.rels": (
+                '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                '<Relationship Id="rIdUnsupported" '
+                'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject" '
+                'Target="embeddings/unsupported.bin"/>'
+                '</Relationships>'
+            ).encode(),
+            member_name: b"%PDF-1.7\\nstatic-unsupported-compression-fixture",
+        }
+        path = create_office_package(
+            self.root / "ole-unsupported-compression.docx", "docx", extras
+        )
+
+        raw = bytearray(path.read_bytes())
+        with zipfile.ZipFile(path, "r") as archive:
+            info = archive.getinfo(member_name)
+            struct.pack_into("<H", raw, info.header_offset + 8, 99)
+
+            position = archive.start_dir
+            target_name = member_name.encode()
+            central_found = False
+            while position < len(raw):
+                if raw[position:position + 4] != b"PK\x01\x02":
+                    break
+                filename_length, extra_length, comment_length = struct.unpack_from(
+                    "<HHH", raw, position + 28
+                )
+                filename_start = position + 46
+                filename = bytes(raw[filename_start:filename_start + filename_length])
+                if filename == target_name:
+                    struct.pack_into("<H", raw, position + 10, 99)
+                    central_found = True
+                    break
+                position += 46 + filename_length + extra_length + comment_length
+
+        self.assertTrue(central_found)
+        path.write_bytes(raw)
+
+        report = analyze_file(path)
+        ole = report["office_analysis"]["ole_object_references"][0]
+
+        self.assertEqual(ole["relationship_status"], "linked")
+        self.assertEqual(
+            ole["embedded_content_status"], "skipped_unsupported_compression"
+        )
+        self.assertEqual(
+            ole["embedded_content_skip_reason"], "unsupported_compression_method"
+        )
+        self.assertEqual(ole["embedded_content_bytes_inspected"], 0)
+        self.assertIsNone(ole["embedded_content_kind"])
+        self.assertEqual(report["office_analysis"]["status"], "partial")
+        self.assertEqual(report["assessment"]["verdict"], "not_assessed")
+
+    def test_ole_embedded_payload_with_excessive_compression_is_not_read(self):
+        payload = b"A" * (8 * 1024 * 1024)
+        extras = {
+            "word/document.xml": (
+                '<w:document xmlns:w="urn:test:word" '
+                'xmlns:o="urn:test:office" '
+                'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+                '<w:body><w:object><o:OLEObject Type="Embed" r:id="rIdCompressed"/>'
+                '</w:object></w:body></w:document>'
+            ).encode(),
+            "word/_rels/document.xml.rels": (
+                '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                '<Relationship Id="rIdCompressed" '
+                'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject" '
+                'Target="embeddings/compressed.bin"/>'
+                '</Relationships>'
+            ).encode(),
+            "word/embeddings/compressed.bin": payload,
+        }
+        path = create_office_package(
+            self.root / "ole-compression-limit.docx", "docx", extras
+        )
+
+        with zipfile.ZipFile(path, "r") as archive:
+            info = archive.getinfo("word/embeddings/compressed.bin")
+            self.assertGreater(
+                info.file_size / info.compress_size, MAX_COMPRESSION_RATIO
+            )
+
+        report = analyze_file(path)
+        ole = report["office_analysis"]["ole_object_references"][0]
+
+        self.assertEqual(ole["relationship_status"], "linked")
+        self.assertEqual(
+            ole["embedded_content_status"], "skipped_compression_ratio"
+        )
+        self.assertEqual(
+            ole["embedded_content_skip_reason"], "compression_ratio_limit"
+        )
+        self.assertEqual(ole["embedded_content_bytes_inspected"], 0)
+        self.assertIsNone(ole["embedded_content_kind"])
+        self.assertIsNone(ole["embedded_content_signature"])
+        self.assertEqual(report["office_analysis"]["status"], "partial")
+
+        ole_evidence = [
+            item for item in report["evidence"]
+            if item.get("evidence_type") == "office_ole_object_reference"
+        ]
+        self.assertEqual(len(ole_evidence), 1)
+        self.assertEqual(
+            ole_evidence[0]["details"]["embedded_content_status"],
+            "skipped_compression_ratio",
+        )
+        self.assertEqual(
+            ole_evidence[0]["details"]["embedded_content_skip_reason"],
+            "compression_ratio_limit",
+        )
+
+        markdown = to_markdown(report)
+        self.assertIn("skipped_compression_ratio", markdown)
+        self.assertIn("compression_ratio_limit", markdown)
+
+        html = to_html(report)
+        self.assertIn("skipped_compression_ratio", html)
+        self.assertIn("compression_ratio_limit", html)
+        self.assertEqual(report["assessment"]["verdict"], "not_assessed")
+
+    def test_ole_object_embedded_payload_signature_identifies_pdf(self):
+        payload = b"%PDF-1.7\\nstatic-pdf-fixture"
+        extras = {
+            "word/document.xml": (
+                '<w:document xmlns:w="urn:test:word" '
+                'xmlns:o="urn:test:office" '
+                'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+                '<w:body><w:object><o:OLEObject Type="Embed" '
+                'ProgID="Package" r:id="rIdPdf"/></w:object></w:body></w:document>'
+            ).encode(),
+            "word/_rels/document.xml.rels": (
+                '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                '<Relationship Id="rIdPdf" '
+                'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject" '
+                'Target="embeddings/document.bin"/>'
+                '</Relationships>'
+            ).encode(),
+            "word/embeddings/document.bin": payload,
+        }
+        path = create_office_package(
+            self.root / "ole-embedded-pdf.docx", "docx", extras
+        )
+        report = analyze_file(path)
+        references = report["office_analysis"]["ole_object_references"]
+
+        self.assertEqual(len(references), 1)
+        ole = references[0]
+        self.assertEqual(ole["relationship_status"], "linked")
+        self.assertEqual(ole["embedded_content_status"], "identified")
+        self.assertEqual(ole["embedded_content_kind"], "pdf")
+        self.assertEqual(ole["embedded_content_signature"], "pdf_header")
+        self.assertEqual(
+            ole["embedded_content_bytes_inspected"], len(payload)
+        )
+        ole_evidence = [
+            item for item in report["evidence"]
+            if item.get("evidence_type") == "office_ole_object_reference"
+        ]
+        self.assertEqual(len(ole_evidence), 1)
+        details = ole_evidence[0]["details"]
+        self.assertEqual(details["embedded_content_status"], "identified")
+        self.assertEqual(details["embedded_content_kind"], "pdf")
+        self.assertEqual(details["embedded_content_signature"], "pdf_header")
+        self.assertEqual(details["embedded_content_bytes_inspected"], len(payload))
+        self.assertIn("bounded prefix", details["interpretation"].casefold())
+        self.assertIn("not executed", details["interpretation"].casefold())
+
+        markdown = to_markdown(report)
+        self.assertIn("Embedded content kind", markdown)
+        self.assertIn("pdf_header", markdown)
+        self.assertIn("bounded payload signature", markdown.casefold())
+        self.assertNotIn("payload bytes not read", markdown.casefold())
+
+        html = to_html(report)
+        self.assertIn("pdf_header", html)
+        self.assertIn("bounded payload signature", html.casefold())
+        self.assertEqual(report["assessment"]["verdict"], "not_assessed")
 
     def test_ole_object_rejects_unrecognized_relationship_type_uri(self):
         extras = {

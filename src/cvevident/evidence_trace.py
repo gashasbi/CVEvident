@@ -167,14 +167,26 @@ def append_reported_source_evidence(report: dict[str, Any]) -> None:
                 "relationship_status": reference.get("relationship_status"),
                 "embedded_part": reference.get("embedded_part"),
                 "embedded_part_present": reference.get("embedded_part_present"),
+                "embedded_part_ambiguous": reference.get("embedded_part_ambiguous"),
                 "object_type": reference.get("object_type"),
                 "prog_id": reference.get("prog_id"),
                 "shape_id": reference.get("shape_id"),
                 "object_id": reference.get("object_id"),
                 "draw_aspect": reference.get("draw_aspect"),
+                "embedded_content_status": reference.get("embedded_content_status"),
+                "embedded_content_skip_reason": reference.get(
+                    "embedded_content_skip_reason"
+                ),
+                "embedded_content_kind": reference.get("embedded_content_kind"),
+                "embedded_content_signature": reference.get("embedded_content_signature"),
+                "embedded_content_bytes_inspected": reference.get(
+                    "embedded_content_bytes_inspected"
+                ),
                 "interpretation": (
-                    "Bounded static OLE metadata was associated with its source XML and "
-                    "package relationship where available; embedded payload bytes were not read or executed."
+                    "Bounded OLE metadata was associated with its source XML and package "
+                    "relationship where available. A bounded prefix of a linked internal payload "
+                    "may be inspected for a file signature; embedded content is not executed or "
+                    "extracted to disk."
                 ),
             },
         })

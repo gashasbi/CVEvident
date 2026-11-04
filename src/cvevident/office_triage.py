@@ -63,6 +63,7 @@ MAX_COMPRESSION_RATIO = 1_000
 MAX_RELATIONSHIP_EXAMPLES = 25
 MAX_OLE_OBJECT_REFERENCES = 25
 MAX_OLE_RELATIONSHIP_ENTRIES = 1_000
+MAX_EMBEDDED_SIGNATURE_BYTES = 64
 OLE_OBJECT_RELATIONSHIP_TYPES = frozenset({
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject",
     "http://purl.oclc.org/ooxml/officeDocument/relationships/oleObject",
@@ -281,6 +282,31 @@ def _resolve_internal_relationship_target(
     return "/".join(resolved)
 
 
+def _identify_embedded_content(
+    prefix: bytes,
+) -> tuple[str, str] | None:
+    signatures = (
+        (b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1", "ole_cfb", "cfb_header"),
+        (b"%PDF-", "pdf", "pdf_header"),
+        (b"PK\x03\x04", "zip", "zip_local_file_header"),
+        (b"PK\x05\x06", "zip", "zip_empty_archive"),
+        (b"PK\x07\x08", "zip", "zip_spanned_archive"),
+        (b"{\\rtf", "rtf", "rtf_header"),
+        (b"\x7fELF", "elf_binary", "elf_header"),
+        (b"MSCF", "cab_archive", "cab_header"),
+        (b"\x1f\x8b", "gzip", "gzip_header"),
+        (b"7z\xbc\xaf\x27\x1c", "7z", "7z_header"),
+        (b"Rar!\x1a\x07\x00", "rar", "rar4_header"),
+        (b"Rar!\x1a\x07\x01\x00", "rar", "rar5_header"),
+    )
+    for signature, kind, label in signatures:
+        if prefix.startswith(signature):
+            return kind, label
+    if prefix.startswith(b"MZ"):
+        return "mz_executable", "mz_header"
+    return None
+
+
 def _parse_xml(data: bytes) -> ElementTree.Element:
     # Office package XML should not need DTDs/entities. Reject them before parsing to
     # avoid entity-expansion risks; the finding remains a partial-analysis condition.
@@ -445,12 +471,19 @@ def analyze_office(
             warnings.append(f"Package contains {len(encrypted_names)} encrypted member(s); encrypted content was not read.")
             partial = True
 
-        usable_infos = [
+        package_member_names = {
+            info.filename for info in all_infos
+            if not info.is_dir() and info.filename not in unsafe_names
+        }
+        safe_member_infos = [
             info for info in all_infos
             if not info.is_dir()
             and info.filename not in duplicate_names
             and info.filename not in unsafe_names
-            and info.filename not in encrypted_names
+        ]
+        usable_infos = [
+            info for info in safe_member_infos
+            if info.filename not in encrypted_names
         ]
         info_by_name = {info.filename: info for info in usable_infos}
         content_types_info = info_by_name.get("[Content_Types].xml")
@@ -815,6 +848,12 @@ def analyze_office(
                 "target_scheme": None,
                 "embedded_part": None,
                 "embedded_part_present": False,
+                "embedded_part_ambiguous": False,
+                "embedded_content_status": "not_inspected",
+                "embedded_content_skip_reason": None,
+                "embedded_content_kind": None,
+                "embedded_content_signature": None,
+                "embedded_content_bytes_inspected": 0,
             })
 
             relationship_id = observed["relationship_id"]
@@ -855,15 +894,102 @@ def analyze_office(
                             "target_kind": "invalid_package_target",
                         })
                     else:
-                        part_present = embedded_part in info_by_name
+                        part_present = embedded_part in package_member_names
+                        part_ambiguous = embedded_part in duplicate_names
                         reference.update({
                             "relationship_status": (
-                                "linked" if part_present else "embedded_part_missing"
+                                "ambiguous_embedded_part"
+                                if part_ambiguous
+                                else "linked" if part_present else "embedded_part_missing"
                             ),
                             "target_kind": "package_part",
                             "embedded_part": embedded_part,
                             "embedded_part_present": part_present,
+                            "embedded_part_ambiguous": part_ambiguous,
                         })
+                        if part_ambiguous:
+                            partial = True
+                            warnings.append(
+                                "An OLE embedded package member has an ambiguous duplicate "
+                                "name and was not inspected."
+                            )
+                        if part_present and not part_ambiguous:
+                            if embedded_part in encrypted_names:
+                                reference["embedded_content_status"] = "skipped_encrypted"
+                                reference["embedded_content_skip_reason"] = (
+                                    "encrypted_member"
+                                )
+                                partial = True
+                                warnings.append(
+                                    "An OLE embedded package member is encrypted and "
+                                    "was not read for signature inspection."
+                                )
+                            else:
+                                embedded_info = info_by_name[embedded_part]
+                                compression_ratio_exceeded = embedded_info.file_size and (
+                                    not embedded_info.compress_size
+                                    or embedded_info.file_size / embedded_info.compress_size
+                                    > MAX_COMPRESSION_RATIO
+                                )
+                                if compression_ratio_exceeded:
+                                    reference["embedded_content_status"] = (
+                                        "skipped_compression_ratio"
+                                    )
+                                    reference["embedded_content_skip_reason"] = (
+                                        "compression_ratio_limit"
+                                    )
+                                    partial = True
+                                    warnings.append(
+                                        "An OLE embedded package member was skipped because "
+                                        "its declared compression ratio exceeds the configured limit."
+                                    )
+                                else:
+                                    try:
+                                        with archive.open(embedded_info, "r") as embedded_stream:
+                                            prefix = embedded_stream.read(
+                                                MAX_EMBEDDED_SIGNATURE_BYTES
+                                            )
+                                        if len(prefix) > embedded_info.file_size:
+                                            raise ValueError(
+                                                "Embedded member exceeded its declared size"
+                                            )
+                                    except NotImplementedError:
+                                        reference["embedded_content_status"] = (
+                                            "skipped_unsupported_compression"
+                                        )
+                                        reference["embedded_content_skip_reason"] = (
+                                            "unsupported_compression_method"
+                                        )
+                                        partial = True
+                                        warnings.append(
+                                            "An OLE embedded package member was skipped because "
+                                            "its ZIP compression method is unsupported."
+                                        )
+                                    except (
+                                        zipfile.BadZipFile,
+                                        OSError,
+                                        RuntimeError,
+                                        ValueError,
+                                        zlib.error,
+                                        EOFError,
+                                    ):
+                                        reference["embedded_content_status"] = "read_failed"
+                                        partial = True
+                                        warnings.append(
+                                            "An OLE embedded package member could not be read "
+                                            "for bounded signature inspection."
+                                        )
+                                    else:
+                                        reference["embedded_content_bytes_inspected"] = len(prefix)
+                                        identified = _identify_embedded_content(prefix)
+                                        if identified:
+                                            reference["embedded_content_status"] = "identified"
+                                            reference["embedded_content_kind"] = identified[0]
+                                            reference["embedded_content_signature"] = identified[1]
+                                        else:
+                                            reference["embedded_content_status"] = (
+                                                "empty" if not prefix else "unrecognized"
+                                            )
 
             if reference["relationship_status"] not in {"linked", "external_target"}:
                 unresolved_ole_references = True
@@ -884,7 +1010,12 @@ def analyze_office(
 
         package_status = "partial" if partial else "parsed"
         warnings.append("Office structure and relationships are contextual observations; they are not a malware verdict.")
-        warnings.append("Macros, scripts, hyperlinks, external relationships, and embedded objects were not executed, opened, extracted to disk, or fetched.")
+        warnings.append(
+            "Macros and scripts were not executed. Hyperlink and external relationship "
+            "targets were not opened or fetched. Embedded objects were not executed or "
+            "extracted to disk; linked internal OLE payloads may be read only as bounded "
+            "prefixes for signature identification."
+        )
         if features["vba_project_present"]:
             warnings.append("A VBA project binary is present; its code was not executed or decompiled by this analyzer.")
             if not macro_enabled_format:
