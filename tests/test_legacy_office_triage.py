@@ -60,6 +60,149 @@ def build_cfb(names, *, major=3):
     return bytes(header) + dir_stream + fat_sector
 
 
+def build_cfb_with_root_tree(names, *, major=3):
+    data = bytearray(build_cfb(names, major=major))
+    if not names or names[0][1] != 5:
+        raise ValueError("The first directory entry must be Root Entry.")
+
+    def name_key(index):
+        encoded = names[index][0].encode("utf-16le")
+        units = struct.unpack(f"<{len(encoded) // 2}H", encoded)
+        uppercase_units = []
+        for unit in units:
+            if 0xD800 <= unit <= 0xDFFF:
+                uppercase_units.append(unit)
+                continue
+            transformed = chr(unit).upper()
+            if len(transformed) == 1:
+                uppercase_units.append(ord(transformed))
+                continue
+            titlecase = chr(unit).title()
+            uppercase_units.append(
+                ord(titlecase) if len(titlecase) == 1 else unit
+            )
+        return len(encoded) + 2, tuple(uppercase_units)
+
+    ordered = sorted(
+        range(1, len(names)),
+        key=lambda index: (name_key(index), index),
+    )
+    left = {}
+    right = {}
+    parent = {}
+    color = {}
+    root = [None]
+
+    def rotate_left(node):
+        pivot = right[node]
+        right[node] = left[pivot]
+        if left[pivot] is not None:
+            parent[left[pivot]] = node
+        parent[pivot] = parent[node]
+        if parent[node] is None:
+            root[0] = pivot
+        elif node == left[parent[node]]:
+            left[parent[node]] = pivot
+        else:
+            right[parent[node]] = pivot
+        left[pivot] = node
+        parent[node] = pivot
+
+    def rotate_right(node):
+        pivot = left[node]
+        left[node] = right[pivot]
+        if right[pivot] is not None:
+            parent[right[pivot]] = node
+        parent[pivot] = parent[node]
+        if parent[node] is None:
+            root[0] = pivot
+        elif node == right[parent[node]]:
+            right[parent[node]] = pivot
+        else:
+            left[parent[node]] = pivot
+        right[pivot] = node
+        parent[node] = pivot
+
+    for node in ordered:
+        left[node] = None
+        right[node] = None
+        parent[node] = None
+        color[node] = 0
+
+        cursor = root[0]
+        insertion_parent = None
+        node_key = (name_key(node), node)
+
+        while cursor is not None:
+            insertion_parent = cursor
+            if node_key < (name_key(cursor), cursor):
+                cursor = left[cursor]
+            else:
+                cursor = right[cursor]
+
+        parent[node] = insertion_parent
+        if insertion_parent is None:
+            root[0] = node
+        elif node_key < (name_key(insertion_parent), insertion_parent):
+            left[insertion_parent] = node
+        else:
+            right[insertion_parent] = node
+
+        while node != root[0] and color[parent[node]] == 0:
+            grandparent = parent[parent[node]]
+            if parent[node] == left[grandparent]:
+                uncle = right[grandparent]
+                if uncle is not None and color[uncle] == 0:
+                    color[parent[node]] = 1
+                    color[uncle] = 1
+                    color[grandparent] = 0
+                    node = grandparent
+                else:
+                    if node == right[parent[node]]:
+                        node = parent[node]
+                        rotate_left(node)
+                    color[parent[node]] = 1
+                    color[grandparent] = 0
+                    rotate_right(grandparent)
+            else:
+                uncle = left[grandparent]
+                if uncle is not None and color[uncle] == 0:
+                    color[parent[node]] = 1
+                    color[uncle] = 1
+                    color[grandparent] = 0
+                    node = grandparent
+                else:
+                    if node == left[parent[node]]:
+                        node = parent[node]
+                        rotate_right(node)
+                    color[parent[node]] = 1
+                    color[grandparent] = 0
+                    rotate_left(grandparent)
+
+        color[root[0]] = 1
+
+    directory_offset = 512 if major == 3 else 4096
+    struct.pack_into(
+        "<I",
+        data,
+        directory_offset + 76,
+        root[0] if root[0] is not None else FREE,
+    )
+
+    for node in ordered:
+        entry_offset = directory_offset + node * 128
+        struct.pack_into(
+            "<II",
+            data,
+            entry_offset + 68,
+            left[node] if left[node] is not None else FREE,
+            right[node] if right[node] is not None else FREE,
+        )
+        data[entry_offset + 67] = color[node]
+
+    return bytes(data)
+
+
 class LegacyOfficeTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -74,7 +217,7 @@ class LegacyOfficeTests(unittest.TestCase):
         return analyze_legacy_office(str(path))
 
     def test_detects_legacy_word_and_vba_directory_indicators(self):
-        data = build_cfb([
+        data = build_cfb_with_root_tree([
             ("Root Entry", 5), ("WordDocument", 2), ("0Table", 2),
             ("VBA", 1), ("dir", 2), ("_VBA_PROJECT", 2), ("PROJECT", 2),
         ])
@@ -122,6 +265,512 @@ class LegacyOfficeTests(unittest.TestCase):
                     any("required Root Entry" in warning for warning in report["warnings"])
                 )
 
+    def test_directory_tree_rejects_child_reference_outside_directory(self):
+        data = bytearray(build_cfb([
+            ("Root Entry", 5),
+            ("WordDocument", 2),
+        ]))
+        struct.pack_into("<I", data, 512 + 76, 999)
+
+        report = self.analyze("invalid-directory-child.doc", bytes(data))
+        analysis = report["legacy_office_analysis"]
+
+        self.assertEqual(analysis["status"], "partial")
+        self.assertIs(analysis["directory_tree_valid"], False)
+        self.assertTrue(any(
+            "directory tree" in warning.casefold()
+            and "outside" in warning.casefold()
+            for warning in analysis["warnings"]
+        ))
+        self.assertEqual(report["assessment"]["verdict"], "not_assessed")
+
+    def test_directory_tree_rejects_entry_referenced_from_multiple_parents(self):
+        data = bytearray(build_cfb([
+            ("Root Entry", 5),
+            ("StorageA", 1),
+            ("StorageB", 1),
+            ("SharedStream", 2),
+            ("WordDocument", 2),
+        ]))
+
+        directory_offset = 512
+        struct.pack_into("<I", data, directory_offset + 76, 1)
+        struct.pack_into("<I", data, directory_offset + 128 + 72, 2)
+        struct.pack_into("<I", data, directory_offset + 128 + 76, 3)
+        struct.pack_into("<I", data, directory_offset + 256 + 76, 3)
+
+        report = self.analyze("directory-multiple-parents.doc", bytes(data))
+        analysis = report["legacy_office_analysis"]
+
+        self.assertEqual(analysis["status"], "partial")
+        self.assertIs(analysis["directory_tree_valid"], False)
+        self.assertTrue(any(
+            "referenced more than once" in warning
+            for warning in analysis["warnings"]
+        ))
+        self.assertEqual(report["assessment"]["verdict"], "not_assessed")
+
+    def test_directory_tree_accepts_balanced_black_root_with_red_children(self):
+        data = bytearray(build_cfb([
+            ("Root Entry", 5),
+            ("ABCDEFGHIJKLM", 1),
+            ("WordDocument", 2),
+            ("AdditionalStream", 2),
+        ]))
+
+        directory_offset = 512
+        struct.pack_into("<I", data, directory_offset + 76, 1)
+        struct.pack_into("<I", data, directory_offset + 128 + 68, 2)
+        struct.pack_into("<I", data, directory_offset + 128 + 72, 3)
+
+        data[directory_offset + 128 + 67] = 1
+        data[directory_offset + 256 + 67] = 0
+        data[directory_offset + 384 + 67] = 0
+
+        report = self.analyze("balanced-red-black-tree.doc", bytes(data))
+        analysis = report["legacy_office_analysis"]
+
+        self.assertEqual(analysis["status"], "parsed")
+        self.assertIs(analysis["directory_tree_valid"], True)
+        self.assertEqual(analysis["family"], "word")
+        self.assertEqual(report["assessment"]["verdict"], "not_assessed")
+
+    def test_directory_tree_accepts_unequal_black_height_when_other_rules_hold(self):
+        data = bytearray(build_cfb([
+            ("Root Entry", 5),
+            ("StorageA", 1),
+            ("WordDocument", 2),
+        ]))
+
+        directory_offset = 512
+        struct.pack_into("<I", data, directory_offset + 76, 1)
+        struct.pack_into("<I", data, directory_offset + 128 + 72, 2)
+
+        data[directory_offset + 128 + 67] = 1
+        data[directory_offset + 256 + 67] = 1
+
+        report = self.analyze("unequal-black-height.doc", bytes(data))
+        analysis = report["legacy_office_analysis"]
+
+        self.assertEqual(analysis["status"], "parsed")
+        self.assertIs(analysis["directory_tree_valid"], True)
+        self.assertEqual(analysis["family"], "word")
+        self.assertEqual(report["assessment"]["verdict"], "not_assessed")
+
+    def test_directory_tree_rejects_consecutive_red_sibling_nodes(self):
+        data = bytearray(build_cfb([
+            ("Root Entry", 5),
+            ("StorageA", 1),
+            ("RedNodeA", 2),
+            ("RedNodeB", 2),
+            ("WordDocument", 2),
+        ]))
+
+        directory_offset = 512
+        struct.pack_into("<I", data, directory_offset + 76, 1)
+        struct.pack_into("<I", data, directory_offset + 128 + 72, 2)
+        struct.pack_into("<I", data, directory_offset + 256 + 72, 3)
+
+        data[directory_offset + 128 + 67] = 1
+        data[directory_offset + 256 + 67] = 0
+        data[directory_offset + 384 + 67] = 0
+
+        report = self.analyze("consecutive-red-directory-nodes.doc", bytes(data))
+        analysis = report["legacy_office_analysis"]
+
+        self.assertEqual(analysis["status"], "partial")
+        self.assertIs(analysis["directory_tree_valid"], False)
+        self.assertTrue(any(
+            "red" in warning.casefold()
+            and ("child" in warning.casefold() or "consecutive" in warning.casefold())
+            for warning in analysis["warnings"]
+        ))
+        self.assertEqual(report["assessment"]["verdict"], "not_assessed")
+
+    def test_directory_tree_rejects_red_root_of_sibling_tree(self):
+        data = bytearray(build_cfb([
+            ("Root Entry", 5),
+            ("StorageA", 1),
+            ("WordDocument", 2),
+        ]))
+
+        struct.pack_into("<I", data, 512 + 76, 1)
+        data[512 + 128 + 67] = 0
+
+        report = self.analyze("red-directory-tree-root.doc", bytes(data))
+        analysis = report["legacy_office_analysis"]
+
+        self.assertEqual(analysis["status"], "partial")
+        self.assertIs(analysis["directory_tree_valid"], False)
+        self.assertTrue(any(
+            "root" in warning.casefold() and "black" in warning.casefold()
+            for warning in analysis["warnings"]
+        ))
+        self.assertEqual(report["assessment"]["verdict"], "not_assessed")
+
+    def test_directory_tree_accepts_valid_two_node_sibling_tree(self):
+        data = bytearray(build_cfb([
+            ("Root Entry", 5),
+            ("StorageA", 1),
+            ("WordDocument", 2),
+        ]))
+
+        directory_offset = 512
+        struct.pack_into("<I", data, directory_offset + 76, 1)
+        struct.pack_into("<I", data, directory_offset + 128 + 72, 2)
+        data[directory_offset + 128 + 67] = 1
+        data[directory_offset + 256 + 67] = 0
+
+        report = self.analyze("valid-directory-tree.doc", bytes(data))
+        analysis = report["legacy_office_analysis"]
+
+        self.assertEqual(analysis["status"], "parsed")
+        self.assertIs(analysis["directory_tree_valid"], True)
+        self.assertEqual(analysis["family"], "word")
+        self.assertEqual(report["assessment"]["verdict"], "not_assessed")
+
+    def test_directory_tree_uses_name_length_before_lexical_order(self):
+        data = bytearray(build_cfb([
+            ("Root Entry", 5),
+            ("Z", 1),
+            ("AA", 2),
+            ("WordDocument", 2),
+        ]))
+
+        directory_offset = 512
+        struct.pack_into("<I", data, directory_offset + 76, 1)
+        struct.pack_into("<I", data, directory_offset + 128 + 72, 2)
+        struct.pack_into("<I", data, directory_offset + 256 + 72, 3)
+
+        data[directory_offset + 128 + 67] = 1
+        data[directory_offset + 256 + 67] = 1
+        data[directory_offset + 384 + 67] = 0
+
+        report = self.analyze("cfb-name-length-order.doc", bytes(data))
+        analysis = report["legacy_office_analysis"]
+
+        self.assertEqual(analysis["status"], "parsed")
+        self.assertIs(analysis["directory_tree_valid"], True)
+        self.assertEqual(analysis["family"], "word")
+
+    def test_directory_tree_rejects_case_insensitive_duplicate_sibling_names(self):
+        data = bytearray(build_cfb([
+            ("Root Entry", 5),
+            ("Alpha", 1),
+            ("ALPHA", 2),
+            ("WordDocument", 2),
+        ]))
+
+        directory_offset = 512
+        struct.pack_into("<I", data, directory_offset + 76, 1)
+        struct.pack_into("<I", data, directory_offset + 128 + 72, 2)
+
+        data[directory_offset + 128 + 67] = 1
+        data[directory_offset + 256 + 67] = 0
+
+        report = self.analyze("cfb-duplicate-sibling-names.doc", bytes(data))
+        analysis = report["legacy_office_analysis"]
+
+        self.assertEqual(analysis["status"], "partial")
+        self.assertIs(analysis["directory_tree_valid"], False)
+        self.assertTrue(any(
+            "ordering" in warning.casefold()
+            or "uniqueness" in warning.casefold()
+            for warning in analysis["warnings"]
+        ))
+        self.assertEqual(report["assessment"]["verdict"], "not_assessed")
+
+    def test_directory_tree_rejects_forbidden_name_characters(self):
+        for index, character in enumerate(("/", "\\\\", ":", "!")):
+            with self.subTest(character=character):
+                invalid_name = f"Bad{character}Name"
+                data = bytearray(build_cfb([
+                    ("Root Entry", 5),
+                    (invalid_name, 2),
+                    ("WordDocument", 2),
+                ]))
+                struct.pack_into("<I", data, 512 + 76, 1)
+
+                report = self.analyze(
+                    f"forbidden-directory-name-{index}.doc", bytes(data)
+                )
+                analysis = report["legacy_office_analysis"]
+
+                self.assertEqual(analysis["status"], "partial")
+                self.assertIs(analysis["directory_tree_valid"], False)
+                self.assertTrue(any(
+                    "forbidden" in warning.casefold()
+                    for warning in analysis["warnings"]
+                ))
+                self.assertEqual(report["assessment"]["verdict"], "not_assessed")
+
+    def test_directory_tree_rejects_names_equal_under_simple_unicode_uppercase(self):
+        names = [
+            ("Root Entry", 5),
+            (chr(0x1F80), 2),
+            (chr(0x1F88), 2),
+            ("WordDocument", 2),
+        ]
+        data = build_cfb_with_root_tree(names)
+        report = self.analyze("unicode-uppercase-duplicate.doc", data)
+        analysis = report["legacy_office_analysis"]
+
+        self.assertEqual(analysis["status"], "partial")
+        self.assertIs(analysis["directory_tree_valid"], False)
+        self.assertTrue(any(
+            "ordering" in warning.casefold()
+            or "uniqueness" in warning.casefold()
+            for warning in analysis["warnings"]
+        ))
+
+    def test_directory_tree_accepts_nonforbidden_control_characters(self):
+        for codepoint in (1, 9, 13, 31):
+            with self.subTest(codepoint=codepoint):
+                names = [
+                    ("Root Entry", 5),
+                    (f"Control{chr(codepoint)}", 2),
+                    ("WordDocument", 2),
+                ]
+                data = build_cfb_with_root_tree(names)
+                report = self.analyze(
+                    f"control-character-{codepoint}.doc", data
+                )
+                analysis = report["legacy_office_analysis"]
+
+                self.assertEqual(analysis["status"], "parsed")
+                self.assertIs(analysis["directory_tree_valid"], True)
+
+
+    def test_directory_tree_rejects_names_outside_binary_search_order(self):
+        data = bytearray(build_cfb([
+            ("Root Entry", 5),
+            ("M", 2),
+            ("Z", 2),
+            ("A", 2),
+            ("WordDocument", 2),
+        ]))
+
+        directory_offset = 512
+        struct.pack_into("<I", data, directory_offset + 76, 1)
+        struct.pack_into("<I", data, directory_offset + 128 + 68, 2)
+        struct.pack_into("<I", data, directory_offset + 128 + 72, 3)
+
+        report = self.analyze("invalid-directory-name-order.doc", bytes(data))
+        analysis = report["legacy_office_analysis"]
+
+        self.assertEqual(analysis["status"], "partial")
+        self.assertIs(analysis["directory_tree_valid"], False)
+        self.assertTrue(any(
+            "ordering" in warning.casefold()
+            for warning in analysis["warnings"]
+        ))
+        self.assertEqual(report["assessment"]["verdict"], "not_assessed")
+
+    def test_root_directory_entry_rejects_sibling_references(self):
+        for field_name, field_offset in (
+            ("left_sibling_id", 68),
+            ("right_sibling_id", 72),
+        ):
+            with self.subTest(field=field_name):
+                data = bytearray(build_cfb([
+                    ("Root Entry", 5),
+                    ("WordDocument", 2),
+                ]))
+                struct.pack_into(
+                    "<I",
+                    data,
+                    512 + field_offset,
+                    1,
+                )
+
+                report = self.analyze(
+                    f"root-has-{field_name}.doc", bytes(data)
+                )
+                analysis = report["legacy_office_analysis"]
+
+                self.assertEqual(analysis["status"], "partial")
+                self.assertIs(analysis["directory_tree_valid"], False)
+                self.assertTrue(any(
+                    "root" in warning.casefold()
+                    and "sibling" in warning.casefold()
+                    for warning in analysis["warnings"]
+                ))
+                self.assertEqual(
+                    report["assessment"]["verdict"], "not_assessed"
+                )
+
+    def test_directory_tree_checks_reachability_when_color_flag_is_invalid(self):
+        data = bytearray(build_cfb([
+            ("Root Entry", 5),
+            ("WordDocument", 2),
+            ("OrphanStream", 2),
+        ]))
+        struct.pack_into("<I", data, 512 + 76, 1)
+        data[512 + 2 * 128 + 67] = 2
+
+        report = self.analyze(
+            "invalid-color-with-orphan.doc", bytes(data)
+        )
+        analysis = report["legacy_office_analysis"]
+
+        self.assertEqual(analysis["status"], "partial")
+        self.assertIs(analysis["directory_tree_valid"], False)
+        self.assertTrue(any(
+            "invalid color flag" in warning.casefold()
+            for warning in analysis["warnings"]
+        ))
+        self.assertTrue(any(
+            "unreachable" in warning.casefold()
+            for warning in analysis["warnings"]
+        ))
+
+    def test_directory_tree_rejects_unreachable_active_entries(self):
+        data = bytearray(build_cfb([
+            ("Root Entry", 5),
+            ("WordDocument", 2),
+        ]))
+        struct.pack_into("<I", data, 512 + 76, 0xFFFFFFFF)
+
+        report = self.analyze(
+            "orphan-directory-entry.doc", bytes(data)
+        )
+        analysis = report["legacy_office_analysis"]
+
+        self.assertEqual(analysis["status"], "partial")
+        self.assertIs(analysis["directory_tree_valid"], False)
+        self.assertTrue(any(
+            "unreachable" in warning.casefold()
+            for warning in analysis["warnings"]
+        ))
+        self.assertEqual(
+            report["assessment"]["verdict"], "not_assessed"
+        )
+
+    def test_directory_tree_rejects_invalid_red_black_color_flag(self):
+        data = bytearray(build_cfb([
+            ("Root Entry", 5),
+            ("WordDocument", 2),
+        ]))
+        data[512 + 128 + 67] = 2
+
+        report = self.analyze("invalid-directory-color.doc", bytes(data))
+        analysis = report["legacy_office_analysis"]
+
+        self.assertEqual(analysis["status"], "partial")
+        self.assertIs(analysis["directory_tree_valid"], False)
+        self.assertTrue(any(
+            "color" in warning.casefold()
+            for warning in analysis["warnings"]
+        ))
+        self.assertEqual(report["assessment"]["verdict"], "not_assessed")
+
+    def test_directory_tree_reports_name_ordering_when_cycle_exists(self):
+        data = bytearray(build_cfb([
+            ("Root Entry", 5),
+            ("M", 2),
+            ("Z", 2),
+            ("WordDocument", 2),
+        ]))
+
+        directory_offset = 512
+        struct.pack_into("<I", data, directory_offset + 76, 1)
+        struct.pack_into("<I", data, directory_offset + 128 + 68, 2)
+        struct.pack_into("<I", data, directory_offset + 256 + 68, 1)
+
+        report = self.analyze(
+            "directory-cycle-and-invalid-order.doc", bytes(data)
+        )
+        analysis = report["legacy_office_analysis"]
+
+        self.assertEqual(analysis["status"], "partial")
+        self.assertIs(analysis["directory_tree_valid"], False)
+        self.assertTrue(any(
+            "cycle" in warning.casefold()
+            for warning in analysis["warnings"]
+        ))
+        self.assertTrue(any(
+            "ordering" in warning.casefold()
+            or "uniqueness" in warning.casefold()
+            for warning in analysis["warnings"]
+        ))
+
+    def test_directory_tree_rejects_cycle_in_sibling_links(self):
+        data = bytearray(build_cfb([
+            ("Root Entry", 5),
+            ("WordDocument", 2),
+        ]))
+
+        struct.pack_into("<I", data, 512 + 76, 1)
+        struct.pack_into("<I", data, 512 + 128 + 68, 1)
+
+        report = self.analyze("directory-sibling-cycle.doc", bytes(data))
+        analysis = report["legacy_office_analysis"]
+
+        self.assertEqual(analysis["status"], "partial")
+        self.assertIs(analysis["directory_tree_valid"], False)
+        self.assertTrue(any(
+            "directory tree" in warning.casefold()
+            and "cycle" in warning.casefold()
+            for warning in analysis["warnings"]
+        ))
+        self.assertEqual(report["assessment"]["verdict"], "not_assessed")
+
+    def test_directory_tree_rejects_sibling_references_outside_directory(self):
+        for field_name, field_offset in (
+            ("left_sibling_id", 68),
+            ("right_sibling_id", 72),
+        ):
+            with self.subTest(field=field_name):
+                data = bytearray(build_cfb([
+                    ("Root Entry", 5),
+                    ("WordDocument", 2),
+                ]))
+                struct.pack_into(
+                    "<I",
+                    data,
+                    512 + 128 + field_offset,
+                    999,
+                )
+
+                report = self.analyze(
+                    f"invalid-{field_name}.doc", bytes(data)
+                )
+                analysis = report["legacy_office_analysis"]
+
+                self.assertEqual(analysis["status"], "partial")
+                self.assertIs(analysis["directory_tree_valid"], False)
+                self.assertTrue(any(
+                    field_name in warning and "outside" in warning
+                    for warning in analysis["warnings"]
+                ))
+                self.assertEqual(
+                    report["assessment"]["verdict"], "not_assessed"
+                )
+
+    def test_directory_tree_rejects_reference_to_unused_directory_slot(self):
+        data = bytearray(build_cfb([
+            ("Root Entry", 5),
+            ("WordDocument", 2),
+        ]))
+        empty_slot = 2
+        struct.pack_into(
+            "<I",
+            data,
+            512 + 128 + 68,
+            empty_slot,
+        )
+
+        report = self.analyze("unused-directory-slot.doc", bytes(data))
+        analysis = report["legacy_office_analysis"]
+
+        self.assertEqual(analysis["status"], "partial")
+        self.assertIs(analysis["directory_tree_valid"], False)
+        self.assertTrue(any(
+            "does not identify a storage or stream entry" in warning
+            for warning in analysis["warnings"]
+        ))
+        self.assertEqual(report["assessment"]["verdict"], "not_assessed")
+
     def test_incomplete_directory_does_not_claim_root_entry_invalid(self):
         from unittest.mock import patch
 
@@ -156,7 +805,7 @@ class LegacyOfficeTests(unittest.TestCase):
         self.assertEqual(report["legacy_office_analysis"]["status"], "failed")
 
     def test_supports_version_four_cfb_sector_size(self):
-        report = self.analyze("version4.doc", build_cfb([("Root Entry", 5), ("WordDocument", 2)], major=4))
+        report = self.analyze("version4.doc", build_cfb_with_root_tree([("Root Entry", 5), ("WordDocument", 2)], major=4))
         self.assertEqual(report["legacy_office_analysis"]["status"], "parsed")
         self.assertEqual(report["legacy_office_analysis"]["sector_size"], 4096)
 

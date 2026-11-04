@@ -53,7 +53,7 @@ def _base_report(file_input: Any, status: str, message: str, file_type: str = "u
             "sector_size": None, "directory_entry_count": 0,
             "stream_count": 0, "storage_count": 0,
             "root_directory_entry_valid": None, "truncated": False,
-            "features": {}, "directory_inventory": [], "warnings": [message],
+            "features": {}, "directory_inventory": [], "directory_tree_valid": None, "warnings": [message],
         },
         "evidence": [
             {"evidence_type": "file_identity", "key": "sha256", "value": file_input.sha256,
@@ -167,6 +167,300 @@ def _parse_directory(directory_bytes: bytes) -> tuple[list[dict[str, Any]], bool
             "child_id": struct.unpack_from("<I", raw, 76)[0],
         })
     return entries, truncated, warnings
+
+
+def _cfb_simple_upper_code_unit(code_unit: int) -> int:
+    if 0xD800 <= code_unit <= 0xDFFF:
+        return code_unit
+
+    character = chr(code_unit)
+    uppercase = character.upper()
+    if len(uppercase) == 1:
+        return ord(uppercase)
+
+    titlecase = character.title()
+    if len(titlecase) == 1:
+        return ord(titlecase)
+
+    return code_unit
+
+
+def _cfb_directory_name_sort_key(raw: bytes) -> tuple[int, tuple[int, ...]] | None:
+    name_length = struct.unpack_from("<H", raw, 64)[0]
+    if (
+        name_length < 2
+        or name_length > 64
+        or name_length % 2
+        or raw[name_length - 2:name_length] != b"\x00\x00"
+    ):
+        return None
+
+    code_units = struct.unpack(
+        f"<{(name_length - 2) // 2}H",
+        raw[:name_length - 2],
+    )
+    uppercase_units = [
+        _cfb_simple_upper_code_unit(code_unit)
+        for code_unit in code_units
+    ]
+
+    return name_length, tuple(uppercase_units)
+
+
+def _validate_directory_references(
+    directory_bytes: bytes,
+    *,
+    complete: bool = True,
+) -> tuple[bool | None, list[str]]:
+    warnings: list[str] = []
+    if not complete or len(directory_bytes) % 128:
+        return None, [
+            "Directory tree references could not be fully validated because the directory stream is incomplete."
+        ]
+
+    entry_count = len(directory_bytes) // 128
+    valid = True
+    directory_references_safe = True
+    reported = 0
+    warning_limit = 25
+
+    def add_warning(message: str) -> None:
+        nonlocal reported
+        if reported < warning_limit:
+            warnings.append(message)
+        elif reported == warning_limit:
+            warnings.append("Additional directory tree validation warnings were omitted.")
+        reported += 1
+
+    for index in range(entry_count):
+        raw = directory_bytes[index * 128:(index + 1) * 128]
+        entry_type = raw[66]
+        if entry_type == 0:
+            continue
+        if entry_type not in (1, 2, 5):
+            valid = False
+            add_warning(
+                f"Directory tree entry {index} has unsupported entry type {entry_type}."
+            )
+            continue
+
+        color_flag = raw[67]
+        if color_flag not in (0, 1):
+            valid = False
+            add_warning(
+                f"Directory tree entry {index} has invalid color flag {color_flag}; expected red (0) or black (1)."
+            )
+
+        name_length = struct.unpack_from("<H", raw, 64)[0]
+        if (
+            2 <= name_length <= 64
+            and name_length % 2 == 0
+            and raw[name_length - 2] == 0
+            and raw[name_length - 1] == 0
+        ):
+            name_units = struct.unpack(
+                f"<{(name_length - 2) // 2}H",
+                raw[:name_length - 2],
+            )
+            forbidden_units = {0x0000, 0x002F, 0x005C, 0x003A, 0x0021}
+            if any(unit in forbidden_units for unit in name_units):
+                valid = False
+                add_warning(
+                    f"Directory tree entry {index} name contains forbidden CFB character(s)."
+                )
+
+        left_id, right_id, child_id = struct.unpack_from("<III", raw, 68)
+
+        for field_name, target_id in (
+            ("left_sibling_id", left_id),
+            ("right_sibling_id", right_id),
+        ):
+            if target_id == _FREESECT:
+                continue
+            if target_id >= entry_count:
+                valid = False
+                directory_references_safe = False
+                add_warning(
+                    f"Directory tree entry {index} {field_name} reference "
+                    f"{target_id} is outside the directory stream ({entry_count} entries)."
+                )
+            elif directory_bytes[target_id * 128 + 66] not in (1, 2):
+                valid = False
+                directory_references_safe = False
+                add_warning(
+                    f"Directory tree entry {index} {field_name} reference "
+                    f"{target_id} does not identify a storage or stream entry."
+                )
+
+        if child_id != _FREESECT:
+            if entry_type not in (1, 5):
+                valid = False
+                add_warning(
+                    f"Directory tree stream entry {index} has a child reference."
+                )
+            if child_id >= entry_count:
+                valid = False
+                directory_references_safe = False
+                add_warning(
+                    f"Directory tree entry {index} child_id reference "
+                    f"{child_id} is outside the directory stream ({entry_count} entries)."
+                )
+            elif directory_bytes[child_id * 128 + 66] not in (1, 2):
+                valid = False
+                directory_references_safe = False
+                add_warning(
+                    f"Directory tree entry {index} child_id reference "
+                    f"{child_id} does not identify a storage or stream entry."
+                )
+            elif directory_bytes[child_id * 128 + 67] != 1:
+                valid = False
+                add_warning(
+                    f"Directory tree root entry {child_id} referenced by "
+                    f"storage entry {index} is red; sibling-tree roots must be black."
+                )
+
+    if directory_references_safe:
+        state = bytearray(entry_count)
+        for start in range(entry_count):
+            start_type = directory_bytes[start * 128 + 66]
+            if start_type not in (1, 2, 5) or state[start] != 0:
+                continue
+
+            stack = [(start, False)]
+            while stack:
+                node_id, exiting = stack.pop()
+
+                if exiting:
+                    state[node_id] = 2
+                    continue
+
+                if state[node_id] == 1:
+                    valid = False
+                    add_warning(
+                        f"Directory tree contains a cycle involving entry {node_id}."
+                    )
+                    continue
+
+                if state[node_id] == 2:
+                    valid = False
+                    add_warning(
+                        f"Directory tree entry {node_id} is referenced more than once."
+                    )
+                    continue
+
+                state[node_id] = 1
+                stack.append((node_id, True))
+
+                raw = directory_bytes[node_id * 128:(node_id + 1) * 128]
+                entry_type = raw[66]
+                left_id, right_id, child_id = struct.unpack_from("<III", raw, 68)
+
+                targets = []
+                if entry_type in (1, 2):
+                    for field_name, target_id in (
+                        ("left_sibling_id", left_id),
+                        ("right_sibling_id", right_id),
+                    ):
+                        if target_id == _FREESECT:
+                            continue
+                        target_color = directory_bytes[target_id * 128 + 67]
+                        if raw[67] == 0 and target_color == 0:
+                            valid = False
+                            add_warning(
+                                "Directory tree contains consecutive red sibling "
+                                f"nodes {node_id} and {target_id} via {field_name}."
+                            )
+                        targets.append(target_id)
+
+                if entry_type in (1, 5) and child_id != _FREESECT:
+                    targets.append(child_id)
+
+                for target_id in targets:
+                    stack.append((target_id, False))
+
+    if directory_references_safe:
+        bst_visited_nodes = set()
+        for storage_id in range(entry_count):
+            storage_raw = directory_bytes[
+                storage_id * 128:(storage_id + 1) * 128
+            ]
+            if storage_raw[66] not in (1, 5):
+                continue
+
+            tree_root = struct.unpack_from("<I", storage_raw, 76)[0]
+            if tree_root == _FREESECT:
+                continue
+
+            stack = [(tree_root, None, None)]
+            while stack:
+                node_id, lower_bound, upper_bound = stack.pop()
+                if node_id in bst_visited_nodes:
+                    continue
+                bst_visited_nodes.add(node_id)
+                raw = directory_bytes[node_id * 128:(node_id + 1) * 128]
+                left_id, right_id = struct.unpack_from("<II", raw, 68)
+                key = _cfb_directory_name_sort_key(raw)
+
+                if key is None:
+                    valid = False
+                    add_warning(
+                        f"Directory tree entry {node_id} has an invalid name and cannot be ordered."
+                    )
+                    if right_id != _FREESECT:
+                        stack.append((right_id, lower_bound, upper_bound))
+                    if left_id != _FREESECT:
+                        stack.append((left_id, lower_bound, upper_bound))
+                    continue
+
+                if lower_bound is not None and key <= lower_bound:
+                    valid = False
+                    add_warning(
+                        f"Directory tree entry {node_id} violates CFB name ordering or sibling-name uniqueness."
+                    )
+                if upper_bound is not None and key >= upper_bound:
+                    valid = False
+                    add_warning(
+                        f"Directory tree entry {node_id} violates CFB name ordering or sibling-name uniqueness."
+                    )
+
+                if right_id != _FREESECT:
+                    stack.append((right_id, key, upper_bound))
+                if left_id != _FREESECT:
+                    stack.append((left_id, lower_bound, key))
+
+    if directory_references_safe:
+        reachable = bytearray(entry_count)
+        stack = [0] if entry_count else []
+
+        while stack:
+            node_id = stack.pop()
+            if reachable[node_id]:
+                continue
+            reachable[node_id] = 1
+
+            raw = directory_bytes[node_id * 128:(node_id + 1) * 128]
+            entry_type = raw[66]
+            left_id, right_id, child_id = struct.unpack_from("<III", raw, 68)
+
+            if entry_type in (1, 2):
+                if left_id != _FREESECT:
+                    stack.append(left_id)
+                if right_id != _FREESECT:
+                    stack.append(right_id)
+
+            if entry_type in (1, 5) and child_id != _FREESECT:
+                stack.append(child_id)
+
+        for node_id in range(entry_count):
+            entry_type = directory_bytes[node_id * 128 + 66]
+            if entry_type not in (1, 2, 5) or reachable[node_id]:
+                continue
+            valid = False
+            add_warning(
+                f"Directory tree entry {node_id} is unreachable from root entry 0."
+            )
+
+    return valid, warnings
 
 
 def analyze_legacy_office(path: str, max_bytes: int = 100 * 1024 * 1024) -> dict[str, Any]:
@@ -288,6 +582,34 @@ def analyze_legacy_office(path: str, max_bytes: int = 100 * 1024 * 1024) -> dict
 
     entries, entries_truncated, parse_warnings = _parse_directory(directory_bytes)
     warnings.extend(parse_warnings)
+
+    directory_tree_valid, directory_tree_warnings = _validate_directory_references(
+        directory_bytes,
+        complete=(
+            not chain_partial
+            and not entries_truncated
+            and len(directory_bytes) % 128 == 0
+        ),
+    )
+    if len(directory_bytes) >= 128:
+        root_left_sibling_id = struct.unpack_from(
+            "<I", directory_bytes, 68
+        )[0]
+        root_right_sibling_id = struct.unpack_from(
+            "<I", directory_bytes, 72
+        )[0]
+        if (
+            root_left_sibling_id != _FREESECT
+            or root_right_sibling_id != _FREESECT
+        ):
+            directory_tree_valid = False
+            directory_tree_warnings.append(
+                "Root directory entry has sibling references; "
+                "left and right sibling IDs must both be NOSTREAM."
+            )
+    warnings.extend(directory_tree_warnings)
+    if directory_tree_valid is False:
+        partial = True
 
     inventory_truncated = entries_truncated or len(entries) > _MAX_INVENTORY
 
@@ -464,6 +786,7 @@ def analyze_legacy_office(path: str, max_bytes: int = 100 * 1024 * 1024) -> dict
             "mini_fat_sector_count_declared": num_mini_fat_sectors,
             "directory_entry_count": len(entries), "stream_count": len(stream_entries),
             "storage_count": len(storage_entries), "directory_chain_truncated": chain_partial,
+            "directory_tree_valid": directory_tree_valid,
             "root_directory_entry_valid": root_directory_entry_valid,
             "truncated": bool(partial or entries_truncated or inventory_truncated),
             "macro_enabled_format": bool(vba_present), "vba_project_present": bool(vba_present),
