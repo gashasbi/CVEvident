@@ -114,6 +114,60 @@ class OfficeTriageTests(unittest.TestCase):
         self.assertEqual(report["assessment"]["verdict"], "not_assessed")
 
 
+
+    def test_external_relationships_are_classified_without_fetching_targets(self):
+        extras = {
+            "word/_rels/document.xml.rels": (
+                '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                '<Relationship Id="r1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" '
+                'Target="https://example.test/document|note" TargetMode="External"/>'
+                '<Relationship Id="r2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject" '
+                'Target="mhtml:https://example.test/payload!x-usc:https://example.test/remote.html" TargetMode="External"/>'
+                '<Relationship Id="r3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/attachedTemplate" '
+                'Target="\\\\fileserver\\templates\\template.dotm" TargetMode="External"/>'
+                '<Relationship Id="r4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/externalLinkPath" '
+                'Target="file:///C:/data/book.xlsx" TargetMode="External"/>'
+                '<Relationship Id="r5" Type="https://example.test/relationships/custom" '
+                'Target="urn:example:external" TargetMode="External"/>'
+                '</Relationships>'
+            ).encode(),
+        }
+        path = create_office_package(
+            self.root / "relationship-classification.docm", "docm", extras
+        )
+        report = analyze_office(str(path))
+        office = report["office_analysis"]
+        relationships = office["external_relationships"]
+
+        self.assertEqual(office["features"]["external_relationship_count"], 5)
+        by_kind = {item.get("relationship_kind"): item for item in relationships}
+
+        self.assertEqual(by_kind["hyperlink"]["target_kind"], "https_url")
+        self.assertEqual(by_kind["hyperlink"]["target_scheme"], "https")
+        self.assertEqual(by_kind["ole_object"]["target_kind"], "mhtml_uri")
+        self.assertEqual(by_kind["ole_object"]["target_scheme"], "mhtml")
+        self.assertEqual(by_kind["attached_template"]["target_kind"], "unc_path")
+        self.assertIsNone(by_kind["attached_template"]["target_scheme"])
+        self.assertEqual(by_kind["external_link_path"]["target_kind"], "file_uri")
+        self.assertEqual(by_kind["external_link_path"]["target_scheme"], "file")
+        self.assertEqual(by_kind["other"]["target_kind"], "other_uri")
+        self.assertEqual(by_kind["other"]["target_scheme"], "urn")
+
+        markdown = to_markdown(report)
+        html = to_html(report)
+        self.assertEqual(by_kind["hyperlink"]["target"], "https://example.test/document|note")
+        self.assertIn("Relationship kind", markdown)
+        self.assertIn("https_url", markdown)
+        self.assertIn("mhtml_uri", markdown)
+        self.assertIn(r"https://example.test/document\|note", markdown)
+        self.assertIn("Relationship kind", html)
+        self.assertIn("<h3>External relationships (targets not opened)</h3>", html)
+        self.assertIn("mhtml_uri", html)
+        self.assertIn("<td>https://example.test/document|note</td>", html)
+        self.assertEqual(report["assessment"]["verdict"], "not_assessed")
+        self.assertTrue(any("not opened" in warning.lower() for warning in office["warnings"]))
+
+
     def test_detects_drawingml_ole_and_hyperlink_elements(self):
         # PowerPoint/DrawingML uses the local names oleObj, hlinkClick, and
         # hlinkMouseOver (not the Word-specific names oleObject/hyperlink).

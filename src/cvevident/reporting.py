@@ -65,13 +65,21 @@ def to_markdown(report: dict[str, Any]) -> str:
                     lines.append(f"| `{_report_single_line(key)}` | `{_report_single_line(value)}` |")
         relationships = office.get("external_relationships", [])
         if relationships:
-            lines += ["", "### External relationships (targets not opened)", "", "| Source part | Relationship type | Target |", "|---|---|---|"]
+            lines += [
+                "", "### External relationships (targets not opened)", "",
+                "| Source part | Relationship kind | Relationship type | Target kind | Target scheme | Target |",
+                "|---|---|---|---|---|---|",
+            ]
             for relation in relationships[:25]:
                 cells = [
-                    _report_single_line(relation.get("source_part", "")).replace("|", "\\|"),
-                    _report_single_line(relation.get("relationship_type", "")).replace("|", "\\|"),
-                    _report_single_line(relation.get("target", "")).replace("|", "\\|"),
+                    _report_single_line(relation.get("source_part", "")),
+                    _report_single_line(relation.get("relationship_kind", "other")),
+                    _report_single_line(relation.get("relationship_type", "")),
+                    _report_single_line(relation.get("target_kind", "unknown")),
+                    _report_single_line(relation.get("target_scheme") or "—"),
+                    _report_single_line(relation.get("target", "")),
                 ]
+                cells = [cell.replace("|", "\\|") for cell in cells]
                 lines.append("| " + " | ".join(cells) + " |")
         parts = office.get("parts_inventory", [])
         if parts:
@@ -504,6 +512,32 @@ def to_markdown(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _split_markdown_table_row(line: str) -> list[str]:
+    text = line.strip()
+    if text.startswith("|"):
+        text = text[1:]
+    if text.endswith("|"):
+        text = text[:-1]
+
+    cells: list[str] = []
+    current: list[str] = []
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char == chr(92) and index + 1 < len(text) and text[index + 1] == "|":
+            current.append("|")
+            index += 2
+            continue
+        if char == "|":
+            cells.append("".join(current).strip())
+            current = []
+        else:
+            current.append(char)
+        index += 1
+    cells.append("".join(current).strip())
+    return cells
+
+
 def to_html(report: dict[str, Any]) -> str:
     """Render a self-contained, escaped HTML report without a Markdown dependency."""
     import re
@@ -537,7 +571,7 @@ def to_html(report: dict[str, Any]) -> str:
             close_list()
             table_rows: list[list[str]] = []
             while index < len(lines) and lines[index].lstrip().startswith("|"):
-                cells = [cell.strip() for cell in lines[index].strip().strip("|").split("|")]
+                cells = _split_markdown_table_row(lines[index])
                 if not cells or all(re.fullmatch(r"[:\- ]+", cell or " ") for cell in cells):
                     index += 1
                     continue
@@ -551,6 +585,8 @@ def to_html(report: dict[str, Any]) -> str:
             continue
         if line.startswith("# "):
             close_list(); rendered.append(f"<h1>{inline(line[2:])}</h1>")
+        elif line.startswith("### "):
+            close_list(); rendered.append(f"<h3>{inline(line[4:])}</h3>")
         elif line.startswith("## "):
             close_list(); rendered.append(f"<h2>{inline(line[3:])}</h2>")
         elif line.startswith("- "):
@@ -569,7 +605,7 @@ def to_html(report: dict[str, Any]) -> str:
             close_list(); rendered.append(f"<p>{inline(line)}</p>")
         index += 1
     close_list()
-    css = "body{font-family:system-ui,sans-serif;max-width:1000px;margin:2rem auto;padding:0 1rem;line-height:1.55;color:#17202a}h1,h2{line-height:1.2}li{margin:.35rem 0}blockquote{border-left:4px solid #bbb;padding-left:1rem;color:#555}code{overflow-wrap:anywhere;background:#f4f4f4;padding:.1em .25em}table{border-collapse:collapse;width:100%;margin:1rem 0}th,td{border:1px solid #ddd;padding:.45rem;text-align:left;vertical-align:top}th{background:#f5f5f5}"
+    css = "body{font-family:system-ui,sans-serif;max-width:1000px;margin:2rem auto;padding:0 1rem;line-height:1.55;color:#17202a}h1,h2,h3{line-height:1.2}li{margin:.35rem 0}blockquote{border-left:4px solid #bbb;padding-left:1rem;color:#555}code{overflow-wrap:anywhere;background:#f4f4f4;padding:.1em .25em}table{border-collapse:collapse;width:100%;margin:1rem 0}th,td{border:1px solid #ddd;padding:.45rem;text-align:left;vertical-align:top}th{background:#f5f5f5}"
     return "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>CVEvident Report</title><style>" + css + "</style></head><body>" + "\n".join(rendered) + "</body></html>"
 
 

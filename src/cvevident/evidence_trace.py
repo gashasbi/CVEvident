@@ -80,7 +80,11 @@ def append_reported_source_evidence(report: dict[str, Any]) -> None:
             "severity": "info",
             "details": {
                 "source_part": relation.get("source_part"),
+                "source_relationship_part": relation.get("source_relationship_part"),
+                "relationship_kind": relation.get("relationship_kind"),
                 "relationship_type": relation.get("relationship_type"),
+                "target_kind": relation.get("target_kind"),
+                "target_scheme": relation.get("target_scheme"),
                 "target": relation.get("target"),
                 "source_example_ordinal": index,
                 "source_examples_may_be_bounded": len(relationships) >= 25,

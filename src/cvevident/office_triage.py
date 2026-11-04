@@ -165,6 +165,54 @@ def _relationship_source(rels_name: str) -> str:
     return _safe_text("/".join(parts[:rels_index] + [source_name]), 300)
 
 
+def _external_relationship_kind(relationship_type: str) -> str:
+    tail = relationship_type.rsplit("/", 1)[-1].split("?", 1)[0].split("#", 1)[0]
+    token = re.sub(r"[^a-z0-9]", "", tail.casefold())
+    return {
+        "hyperlink": "hyperlink",
+        "oleobject": "ole_object",
+        "attachedtemplate": "attached_template",
+        "externallinkpath": "external_link_path",
+    }.get(token, "other")
+
+
+def _classify_external_target(target: str) -> tuple[str, str | None]:
+    value = target.strip()
+    if not value:
+        return "empty_target", None
+    if value.startswith("\\\\") or value.startswith("//"):
+        return "unc_path", None
+    if re.match(r"^[A-Za-z]:[\\/]", value):
+        return "windows_path", None
+    if value.startswith("\\"):
+        return "windows_path", None
+
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return "invalid_uri", None
+
+    scheme = parsed.scheme.casefold()
+    if not scheme:
+        if any(ord(char) < 32 for char in value):
+            return "invalid_uri", None
+        return "relative_reference", None
+
+    if scheme in {"http", "https"}:
+        if not parsed.netloc:
+            return "invalid_uri", scheme
+        return f"{scheme}_url", scheme
+    if scheme == "file":
+        return "file_uri", scheme
+    if scheme == "mhtml":
+        return "mhtml_uri", scheme
+    if scheme == "javascript":
+        return "javascript_uri", scheme
+    if scheme == "mailto":
+        return "mailto_uri", scheme
+    return "other_uri", scheme
+
+
 def _resolve_package_relationship_target(target: str) -> str | None:
     """Resolve a root relationship target to a safe package member name."""
     try:
@@ -618,10 +666,17 @@ def analyze_office(
                     if target_mode.casefold() == "external":
                         features["external_relationship_count"] = int(features["external_relationship_count"]) + 1
                         if len(relationships) < MAX_RELATIONSHIP_EXAMPLES:
+                            relationship_type = _safe_text(node.attrib.get("Type", ""), 240)
+                            target = _safe_text(node.attrib.get("Target", ""), 500)
+                            target_kind, target_scheme = _classify_external_target(target)
                             relationships.append({
                                 "source_part": _safe_text(source_part, 300),
-                                "relationship_type": _safe_text(node.attrib.get("Type", ""), 240),
-                                "target": _safe_text(node.attrib.get("Target", ""), 500),
+                                "source_relationship_part": _safe_text(info.filename, 300),
+                                "relationship_kind": _external_relationship_kind(relationship_type),
+                                "relationship_type": relationship_type,
+                                "target_kind": target_kind,
+                                "target_scheme": target_scheme,
+                                "target": target,
                             })
                 if local in {"oleobject", "oleobj"}:
                     # OOXML commonly spells the DrawingML element as oleObj;
