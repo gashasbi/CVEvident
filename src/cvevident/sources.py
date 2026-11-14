@@ -16,7 +16,7 @@ import urllib.request
 import zlib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .db import connect
 from .store import import_epss_csv, import_kev_json, import_nvd_json, utc_now
@@ -451,8 +451,11 @@ def _request_json(url: str, headers: dict[str, str] | None = None, timeout: int 
     raise RuntimeError(f"NVD API request failed after retries: {last_error}")
 
 
-def sync_nvd_modified(db_path: str | Path | None = None, days: int = 7,
-                      cache_dir: str | Path | None = None, sleep_seconds: float | None = None) -> int:
+def sync_nvd_modified(
+    db_path: str | Path | None = None, days: int = 7,
+    cache_dir: str | Path | None = None, sleep_seconds: float | None = None,
+    progress_callback: Callable[[int, int | None, str], None] | None = None,
+) -> int:
     """Import recent NVD modifications atomically after every page has been validated.
 
     Page responses are cached individually, but database changes are deferred until
@@ -492,6 +495,11 @@ def sync_nvd_modified(db_path: str | Path | None = None, days: int = 7,
             first_record = True
             while True:
                 query = urllib.parse.urlencode({**params, "startIndex": str(start_index)})
+                if progress_callback is not None and expected_total is not None:
+                    progress_callback(
+                        start_index, expected_total * 2,
+                        f"requesting page {start_index // int(params['resultsPerPage']) + 1}",
+                    )
                 payload = _request_json(f"{NVD_URL}?{query}", headers=headers)
                 items = payload["vulnerabilities"]
 
@@ -507,6 +515,10 @@ def sync_nvd_modified(db_path: str | Path | None = None, days: int = 7,
                         f"NVD API pagination mismatch: requested startIndex={start_index}, received {page_start}"
                     )
                 actual_count = len(items)
+                if progress_callback is not None:
+                    progress_callback(
+                        min(start_index + actual_count, page_total), page_total * 2, "downloaded"
+                    )
                 requested_page_limit = int(params["resultsPerPage"])
                 if page_size > requested_page_limit or actual_count > requested_page_limit:
                     raise RuntimeError("NVD API returned more records than the requested page size")
@@ -595,7 +607,16 @@ def sync_nvd_modified(db_path: str | Path | None = None, days: int = 7,
 
         # import_nvd_json wraps its writes in one SQLite transaction. No page is
         # imported until pagination and every response have passed validation.
-        total_imported = import_nvd_json(aggregate_path, db_path=db_path)
+        if progress_callback is None:
+            total_imported = import_nvd_json(aggregate_path, db_path=db_path)
+        else:
+            total_imported = import_nvd_json(
+                aggregate_path, db_path=db_path,
+                progress_callback=lambda current, total: progress_callback(
+                    expected_total + current, expected_total * 2, "saving"
+                ),
+                progress_total=expected_total,
+            )
 
         # The manifest is published last and marks a complete cache run.
         # Never publish page files from a run whose pagination/import failed.

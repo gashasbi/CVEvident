@@ -80,7 +80,11 @@ def append_reported_source_evidence(report: dict[str, Any]) -> None:
             "severity": "info",
             "details": {
                 "source_part": relation.get("source_part"),
+                "source_relationship_part": relation.get("source_relationship_part"),
+                "relationship_kind": relation.get("relationship_kind"),
                 "relationship_type": relation.get("relationship_type"),
+                "target_kind": relation.get("target_kind"),
+                "target_scheme": relation.get("target_scheme"),
                 "target": relation.get("target"),
                 "source_example_ordinal": index,
                 "source_examples_may_be_bounded": len(relationships) >= 25,
@@ -134,6 +138,59 @@ def append_reported_source_evidence(report: dict[str, Any]) -> None:
             },
         })
 
+    ole_references = office.get("ole_object_references", []) or []
+    for index, reference in enumerate(ole_references, start=1):
+        if not isinstance(reference, dict):
+            continue
+        key = f"office.ole_object_reference.{index:04d}"
+        evidence_type = "office_ole_object_reference"
+        if (evidence_type, key) in existing:
+            continue
+
+        evidence.append({
+            "evidence_type": evidence_type,
+            "key": key,
+            "value": (
+                reference.get("embedded_part")
+                or reference.get("relationship_target")
+                or reference.get("relationship_id")
+                or reference.get("source_part")
+            ),
+            "severity": "info",
+            "details": {
+                "source_part": reference.get("source_part"),
+                "element": reference.get("element"),
+                "relationship_part": reference.get("relationship_part"),
+                "relationship_id": reference.get("relationship_id"),
+                "relationship_type": reference.get("relationship_type"),
+                "relationship_target": reference.get("relationship_target"),
+                "relationship_status": reference.get("relationship_status"),
+                "embedded_part": reference.get("embedded_part"),
+                "embedded_part_present": reference.get("embedded_part_present"),
+                "embedded_part_ambiguous": reference.get("embedded_part_ambiguous"),
+                "object_type": reference.get("object_type"),
+                "prog_id": reference.get("prog_id"),
+                "shape_id": reference.get("shape_id"),
+                "object_id": reference.get("object_id"),
+                "draw_aspect": reference.get("draw_aspect"),
+                "embedded_content_status": reference.get("embedded_content_status"),
+                "embedded_content_skip_reason": reference.get(
+                    "embedded_content_skip_reason"
+                ),
+                "embedded_content_kind": reference.get("embedded_content_kind"),
+                "embedded_content_signature": reference.get("embedded_content_signature"),
+                "embedded_content_bytes_inspected": reference.get(
+                    "embedded_content_bytes_inspected"
+                ),
+                "interpretation": (
+                    "Bounded OLE metadata was associated with its source XML and package "
+                    "relationship where available. A bounded prefix of a linked internal payload "
+                    "may be inspected for a file signature; embedded content is not executed or "
+                    "extracted to disk."
+                ),
+            },
+        })
+        existing.add((evidence_type, key))
 def _evidence_class(item: dict[str, Any]) -> str:
     kind = str(item.get("evidence_type", "unknown"))
     if kind == "file_identity":
@@ -242,8 +299,13 @@ def _source_locator(item: dict[str, Any], report: dict[str, Any]) -> dict[str, A
             **file_locator,
             "package_member": package_member,
             "element": details.get("element"),
+            "relationship_id": details.get("relationship_id"),
             "relationship_type": details.get("relationship_type"),
-            "target": details.get("target"),
+            "target": (
+                details.get("embedded_part")
+                or details.get("target")
+                or details.get("relationship_target")
+            ),
             "source_example_ordinal": details.get("source_example_ordinal"),
             "precision": "exact_reported_package_member_and_element_or_relationship_metadata",
             "limitation": "The package member and parsed element/relationship are identified; this is not an offset into the compressed ZIP or XML bytes.",

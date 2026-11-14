@@ -9,7 +9,7 @@ import re
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from .db import connect
 from .product_matching import (
@@ -267,7 +267,11 @@ def _iter_nvd_items(source_path: Path) -> Iterable[dict[str, Any]]:
         raise ValueError(f"Could not stream NVD JSON from {source_path}: {exc}") from exc
 
 
-def import_nvd_json(path: str | Path, db_path: str | Path | None = None) -> int:
+def import_nvd_json(
+    path: str | Path, db_path: str | Path | None = None,
+    progress_callback: Callable[[int, int | None], None] | None = None,
+    progress_total: int | None = None,
+) -> int:
     """Import NVD 2.0 JSON (plain or gzip) and return the number of CVE records visited.
 
     Install the optional `bulk` extra (`pip install -e ".[bulk]"`) to stream annual
@@ -336,6 +340,8 @@ def import_nvd_json(path: str | Path, db_path: str | Path | None = None) -> int:
                              int(product_row["vulnerable"])),
                         )
                 count += 1
+                if progress_callback is not None:
+                    progress_callback(count, progress_total)
             details = (
                 f"Imported {source_path.name}; valid_records={count}; "
                 f"skipped_invalid_records={skipped_invalid_records}"

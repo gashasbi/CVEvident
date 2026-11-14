@@ -198,3 +198,23 @@ def test_get_analysis_returns_none_for_missing_and_raw_value_for_non_json_text(t
     assert report is not None
     assert report["evidence"][0]["value"] == "legacy non-json text"
     assert report["evidence"][0]["details"] == {}
+
+
+def test_nvd_import_keyboard_interrupt_rolls_back_transaction(tmp_path: Path) -> None:
+    db_path = init_db(tmp_path / "store.sqlite3")
+    path = _write_json(
+        tmp_path / "nvd.json",
+        {"vulnerabilities": [{"cve": {"id": "CVE-2099-12345"}}]},
+    )
+
+    def interrupt(_current: int, _total: int | None) -> None:
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        import_nvd_json(path, db_path, progress_callback=interrupt, progress_total=1)
+
+    with connect(db_path) as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM vulnerabilities WHERE cve_id='CVE-2099-12345'"
+        ).fetchone()[0]
+    assert count == 0

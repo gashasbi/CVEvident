@@ -215,3 +215,79 @@ def test_request_json_retries_short_content_length_response(
 
     assert len(attempts) == 4
     assert sleeps == [1, 2, 4]
+
+
+def test_sync_nvd_modified_reports_combined_download_and_import_progress(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    db_path = init_db(tmp_path / "sources.sqlite3")
+    cache_dir = tmp_path / "cache"
+    payload = {
+        "startIndex": 0,
+        "totalResults": 2,
+        "resultsPerPage": 2,
+        "vulnerabilities": [
+            {"cve": {"id": "CVE-2026-10001"}},
+            {"cve": {"id": "CVE-2026-10002"}},
+        ],
+    }
+    monkeypatch.setattr(sources, "_request_json", lambda *_args, **_kwargs: payload)
+
+    def fake_import(path, db_path=None, progress_callback=None, progress_total=None):
+        items = json.loads(Path(path).read_text(encoding="utf-8"))["vulnerabilities"]
+        if progress_callback is not None:
+            for index, _item in enumerate(items, start=1):
+                progress_callback(index, progress_total)
+        return len(items)
+
+    monkeypatch.setattr(sources, "import_nvd_json", fake_import)
+    updates = []
+
+    imported = sources.sync_nvd_modified(
+        db_path,
+        days=3,
+        cache_dir=cache_dir,
+        sleep_seconds=0,
+        progress_callback=lambda current, total, stage: updates.append((current, total, stage)),
+    )
+
+    assert imported == 2
+    assert updates == [
+        (2, 4, "downloaded"),
+        (3, 4, "saving"),
+        (4, 4, "saving"),
+    ]
+
+
+def test_sync_nvd_modified_keyboard_interrupt_discards_staged_pages(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    db_path = init_db(tmp_path / "sources.sqlite3")
+    cache_dir = tmp_path / "cache"
+    payload = {
+        "startIndex": 0,
+        "totalResults": 3,
+        "resultsPerPage": 2,
+        "vulnerabilities": [
+            {"cve": {"id": "CVE-2026-10001"}},
+            {"cve": {"id": "CVE-2026-10002"}},
+        ],
+    }
+    calls = 0
+
+    def fake_request(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return payload
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(sources, "_request_json", fake_request)
+
+    with pytest.raises(KeyboardInterrupt):
+        sources.sync_nvd_modified(db_path, days=3, cache_dir=cache_dir, sleep_seconds=0)
+
+    assert list(cache_dir.iterdir()) == []
+    with connect(db_path) as conn:
+        count = conn.execute("SELECT COUNT(*) FROM vulnerabilities").fetchone()[0]
+    assert count == 0

@@ -13,6 +13,7 @@ from .analyzer import analyze_file
 from .db import SCHEMA_VERSION, connect, default_db_path, init_db
 from .reporting import serialize_json, to_html, to_markdown
 from .product_matching import normalize_product_text, split_product_version
+from .progress import progress
 from .sources import sync_epss, sync_kev, sync_nvd_modified, sync_nvd_year, sync_nvd_years
 from .store import (
     get_analysis, get_cve, get_stats, get_source_freshness, import_epss_csv, import_kev_json,
@@ -409,35 +410,58 @@ def main(argv: list[str] | None = None) -> int:
             _dump(result)
             return 0 if result["healthy"] else 1
         elif args.command == "import-nvd":
-            _dump({"source": "NVD", "records_imported": import_nvd_json(args.json_file, db_path)})
+            with progress("Importing NVD records"):
+                imported = import_nvd_json(args.json_file, db_path)
+            _dump({"source": "NVD", "records_imported": imported})
         elif args.command == "import-kev":
-            _dump({"source": "CISA KEV", "records_imported": import_kev_json(args.json_file, db_path)})
+            with progress("Importing CISA KEV records"):
+                imported = import_kev_json(args.json_file, db_path)
+            _dump({"source": "CISA KEV", "records_imported": imported})
         elif args.command == "import-epss":
-            _dump({"source": "FIRST EPSS", "records_imported": import_epss_csv(args.csv_file, db_path)})
+            with progress("Importing FIRST EPSS scores"):
+                imported = import_epss_csv(args.csv_file, db_path)
+            _dump({"source": "FIRST EPSS", "records_imported": imported})
         elif args.command == "import-samples":
             _dump({"source": "curated reference samples", "samples_imported": import_reference_samples_json(args.json_file, db_path)})
         elif args.command == "sync-kev":
-            _dump({"source": "CISA KEV", "records_imported": sync_kev(db_path, args.cache_file)})
+            with progress("Downloading and importing CISA KEV"):
+                imported = sync_kev(db_path, args.cache_file)
+            _dump({"source": "CISA KEV", "records_imported": imported})
         elif args.command == "sync-epss":
-            _dump({"source": "FIRST EPSS", "records_imported": sync_epss(db_path, args.cache_file)})
+            with progress("Downloading and importing FIRST EPSS"):
+                imported = sync_epss(db_path, args.cache_file)
+            _dump({"source": "FIRST EPSS", "records_imported": imported})
         elif args.command == "sync-nvd":
-            _dump({"source": "NVD", "records_imported": sync_nvd_modified(db_path, args.days, args.cache_dir)})
+            with progress("Synchronizing recently modified NVD records") as bar:
+                imported = sync_nvd_modified(
+                    db_path, args.days, args.cache_dir,
+                    progress_callback=lambda current, total, detail: bar.update(current, total, detail),
+                )
+            _dump({"source": "NVD", "records_imported": imported})
         elif args.command == "sync-nvd-year":
-            _dump({"source": "NVD", **sync_nvd_year(args.year, db_path, args.cache_dir, args.force_download)})
+            with progress(f"Downloading and importing NVD {args.year} feed"):
+                result = sync_nvd_year(args.year, db_path, args.cache_dir, args.force_download)
+            _dump({"source": "NVD", **result})
         elif args.command == "sync-nvd-years":
-            result = sync_nvd_years(args.from_year, args.to_year, db_path, args.cache_dir, args.force_download)
+            with progress("Synchronizing NVD annual feeds"):
+                result = sync_nvd_years(args.from_year, args.to_year, db_path, args.cache_dir, args.force_download)
             _dump({"source": "NVD", **result})
             return 0 if result["status"] == "ok" else 1
         elif args.command == "sync-all":
             outcomes: dict[str, Any] = {}
             tasks = (
-                ("NVD", lambda: sync_nvd_modified(db_path, args.nvd_days)),
-                ("CISA KEV", lambda: sync_kev(db_path)),
-                ("FIRST EPSS", lambda: sync_epss(db_path)),
+                ("NVD", lambda bar: sync_nvd_modified(
+                    db_path, args.nvd_days,
+                    progress_callback=lambda current, total, detail: bar.update(current, total, detail),
+                )),
+                ("CISA KEV", lambda bar: sync_kev(db_path)),
+                ("FIRST EPSS", lambda bar: sync_epss(db_path)),
             )
             for name, action in tasks:
                 try:
-                    outcomes[name] = {"status": "ok", "records_imported": action()}
+                    with progress(f"Synchronizing {name}") as bar:
+                        imported = action(bar)
+                    outcomes[name] = {"status": "ok", "records_imported": imported}
                 except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
                     outcomes[name] = {"status": "error", "error": str(exc)}
             overall = "ok" if all(row["status"] == "ok" for row in outcomes.values()) else "partial_or_failed"
@@ -499,6 +523,9 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
             _write_output(_render(report, args.format), args.output)
         return 0
+    except KeyboardInterrupt:
+        print("\noperation cancelled", file=sys.stderr)
+        return 130
     except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

@@ -61,6 +61,13 @@ MAX_TOTAL_XML_BYTES = 32 * 1024 * 1024
 MAX_XML_PARTS = 300
 MAX_COMPRESSION_RATIO = 1_000
 MAX_RELATIONSHIP_EXAMPLES = 25
+MAX_OLE_OBJECT_REFERENCES = 25
+MAX_OLE_RELATIONSHIP_ENTRIES = 1_000
+MAX_EMBEDDED_SIGNATURE_BYTES = 64
+OLE_OBJECT_RELATIONSHIP_TYPES = frozenset({
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject",
+    "http://purl.oclc.org/ooxml/officeDocument/relationships/oleObject",
+})
 MAX_PART_EXAMPLES = 80
 
 _EXTERNAL_CONTENT_FUNCTIONS = re.compile(r"\b(?:WEBSERVICE|RTD|DDE|HYPERLINK|FILTERXML)\s*\(", re.I)
@@ -165,6 +172,54 @@ def _relationship_source(rels_name: str) -> str:
     return _safe_text("/".join(parts[:rels_index] + [source_name]), 300)
 
 
+def _external_relationship_kind(relationship_type: str) -> str:
+    tail = relationship_type.rsplit("/", 1)[-1].split("?", 1)[0].split("#", 1)[0]
+    token = re.sub(r"[^a-z0-9]", "", tail.casefold())
+    return {
+        "hyperlink": "hyperlink",
+        "oleobject": "ole_object",
+        "attachedtemplate": "attached_template",
+        "externallinkpath": "external_link_path",
+    }.get(token, "other")
+
+
+def _classify_external_target(target: str) -> tuple[str, str | None]:
+    value = target.strip()
+    if not value:
+        return "empty_target", None
+    if value.startswith("\\\\") or value.startswith("//"):
+        return "unc_path", None
+    if re.match(r"^[A-Za-z]:[\\/]", value):
+        return "windows_path", None
+    if value.startswith("\\"):
+        return "windows_path", None
+
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return "invalid_uri", None
+
+    scheme = parsed.scheme.casefold()
+    if not scheme:
+        if any(ord(char) < 32 for char in value):
+            return "invalid_uri", None
+        return "relative_reference", None
+
+    if scheme in {"http", "https"}:
+        if not parsed.netloc:
+            return "invalid_uri", scheme
+        return f"{scheme}_url", scheme
+    if scheme == "file":
+        return "file_uri", scheme
+    if scheme == "mhtml":
+        return "mhtml_uri", scheme
+    if scheme == "javascript":
+        return "javascript_uri", scheme
+    if scheme == "mailto":
+        return "mailto_uri", scheme
+    return "other_uri", scheme
+
+
 def _resolve_package_relationship_target(target: str) -> str | None:
     """Resolve a root relationship target to a safe package member name."""
     try:
@@ -180,6 +235,76 @@ def _resolve_package_relationship_target(target: str) -> str | None:
     if not segments or any(segment in {"", ".", ".."} for segment in segments):
         return None
     return "/".join(segments)
+
+
+def _xml_attribute_by_local_name(
+    node: ElementTree.Element, name: str, limit: int = 240
+) -> str:
+    expected = name.casefold()
+    for key, value in node.attrib.items():
+        if _local_name(key).casefold() == expected:
+            return _safe_text(value, limit)
+    return ""
+
+
+def _resolve_internal_relationship_target(
+    source_part: str, target: str
+) -> str | None:
+    try:
+        parsed = urlsplit(target)
+    except ValueError:
+        return None
+    if parsed.scheme or parsed.netloc or parsed.query or parsed.fragment:
+        return None
+
+    path = unquote(parsed.path)
+    if not path or "\\" in path or "\x00" in path:
+        return None
+    if any(ord(char) < 32 for char in path):
+        return None
+
+    root_relative = path.startswith("/")
+    segments = path.lstrip("/").split("/")
+    if not segments or any(segment in {"", "."} for segment in segments):
+        return None
+
+    resolved = [] if root_relative else list(PurePosixPath(source_part).parent.parts)
+    for segment in segments:
+        if segment == "..":
+            if not resolved:
+                return None
+            resolved.pop()
+        else:
+            resolved.append(segment)
+
+    if not resolved or any(segment in {"", ".", ".."} for segment in resolved):
+        return None
+    return "/".join(resolved)
+
+
+def _identify_embedded_content(
+    prefix: bytes,
+) -> tuple[str, str] | None:
+    signatures = (
+        (b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1", "ole_cfb", "cfb_header"),
+        (b"%PDF-", "pdf", "pdf_header"),
+        (b"PK\x03\x04", "zip", "zip_local_file_header"),
+        (b"PK\x05\x06", "zip", "zip_empty_archive"),
+        (b"PK\x07\x08", "zip", "zip_spanned_archive"),
+        (b"{\\rtf", "rtf", "rtf_header"),
+        (b"\x7fELF", "elf_binary", "elf_header"),
+        (b"MSCF", "cab_archive", "cab_header"),
+        (b"\x1f\x8b", "gzip", "gzip_header"),
+        (b"7z\xbc\xaf\x27\x1c", "7z", "7z_header"),
+        (b"Rar!\x1a\x07\x00", "rar", "rar4_header"),
+        (b"Rar!\x1a\x07\x01\x00", "rar", "rar5_header"),
+    )
+    for signature, kind, label in signatures:
+        if prefix.startswith(signature):
+            return kind, label
+    if prefix.startswith(b"MZ"):
+        return "mz_executable", "mz_header"
+    return None
 
 
 def _parse_xml(data: bytes) -> ElementTree.Element:
@@ -346,12 +471,19 @@ def analyze_office(
             warnings.append(f"Package contains {len(encrypted_names)} encrypted member(s); encrypted content was not read.")
             partial = True
 
-        usable_infos = [
+        package_member_names = {
+            info.filename for info in all_infos
+            if not info.is_dir() and info.filename not in unsafe_names
+        }
+        safe_member_infos = [
             info for info in all_infos
             if not info.is_dir()
             and info.filename not in duplicate_names
             and info.filename not in unsafe_names
-            and info.filename not in encrypted_names
+        ]
+        usable_infos = [
+            info for info in safe_member_infos
+            if info.filename not in encrypted_names
         ]
         info_by_name = {info.filename: info for info in usable_infos}
         content_types_info = info_by_name.get("[Content_Types].xml")
@@ -580,7 +712,12 @@ def analyze_office(
             "unsafe_member_name_count": len(unsafe_names),
             "duplicate_member_name_count": len(duplicate_names),
         }
-        relationships: list[dict[str, str]] = []
+        relationships: list[dict[str, Any]] = []
+        ole_object_candidates: list[dict[str, str]] = []
+        ole_relationships: dict[tuple[str, str], list[dict[str, str]]] = {}
+        ole_relationship_entries_seen = 0
+        ole_object_references_truncated = False
+        ole_relationships_truncated = False
         inspected_part_names: list[str] = []
         for info in xml_infos:
             if info.filename in duplicate_names or info.filename in unsafe_names or info.filename in encrypted_names:
@@ -615,17 +752,59 @@ def analyze_office(
                 local = _local_name(node.tag).casefold()
                 if is_relationship_part and local == "relationship":
                     target_mode = node.attrib.get("TargetMode", "")
+                    relationship_type = _safe_text(node.attrib.get("Type", ""), 240)
+                    relationship_id = _xml_attribute_by_local_name(node, "Id", 240)
+                    target = _safe_text(node.attrib.get("Target", ""), 500)
+                    if relationship_type in OLE_OBJECT_RELATIONSHIP_TYPES:
+                        if ole_relationship_entries_seen < MAX_OLE_RELATIONSHIP_ENTRIES:
+                            if relationship_id:
+                                ole_relationships.setdefault(
+                                    (source_part, relationship_id), []
+                                ).append({
+                                    "source_part": _safe_text(source_part, 300),
+                                    "source_relationship_part": _safe_text(info.filename, 300),
+                                    "relationship_id": relationship_id,
+                                    "relationship_type": relationship_type,
+                                    "target": target,
+                                    "target_mode": target_mode,
+                                })
+                            ole_relationship_entries_seen += 1
+                        else:
+                            if not ole_relationships_truncated:
+                                ole_relationships_truncated = True
+                                partial = True
                     if target_mode.casefold() == "external":
                         features["external_relationship_count"] = int(features["external_relationship_count"]) + 1
                         if len(relationships) < MAX_RELATIONSHIP_EXAMPLES:
+                            relationship_type = _safe_text(node.attrib.get("Type", ""), 240)
+                            target = _safe_text(node.attrib.get("Target", ""), 500)
+                            target_kind, target_scheme = _classify_external_target(target)
                             relationships.append({
                                 "source_part": _safe_text(source_part, 300),
-                                "relationship_type": _safe_text(node.attrib.get("Type", ""), 240),
-                                "target": _safe_text(node.attrib.get("Target", ""), 500),
+                                "source_relationship_part": _safe_text(info.filename, 300),
+                                "relationship_kind": _external_relationship_kind(relationship_type),
+                                "relationship_type": relationship_type,
+                                "target_kind": target_kind,
+                                "target_scheme": target_scheme,
+                                "target": target,
                             })
                 if local in {"oleobject", "oleobj"}:
                     # OOXML commonly spells the DrawingML element as oleObj;
                     # older/alternate markup can use OLEObject.
+                    if len(ole_object_candidates) < MAX_OLE_OBJECT_REFERENCES:
+                        ole_object_candidates.append({
+                            "source_part": _safe_text(info.filename, 300),
+                            "element": _safe_text(_local_name(node.tag), 80),
+                            "relationship_id": _xml_attribute_by_local_name(node, "id", 240),
+                            "object_type": _xml_attribute_by_local_name(node, "Type", 80),
+                            "prog_id": _xml_attribute_by_local_name(node, "ProgID", 160),
+                            "shape_id": _xml_attribute_by_local_name(node, "ShapeID", 120),
+                            "object_id": _xml_attribute_by_local_name(node, "ObjectID", 120),
+                            "draw_aspect": _xml_attribute_by_local_name(node, "DrawAspect", 80),
+                        })
+                    elif not ole_object_references_truncated:
+                        ole_object_references_truncated = True
+                        partial = True
                     features["ole_object_element_count"] = int(features["ole_object_element_count"]) + 1
                 elif local in {"activex", "activexcontrol"}:
                     features["activex_element_count"] = int(features["activex_element_count"]) + 1
@@ -655,9 +834,188 @@ def analyze_office(
                         features["field_instruction_count"] = int(features["field_instruction_count"]) + 1
             del root
 
+        ole_object_references: list[dict[str, Any]] = []
+        unresolved_ole_references = False
+        for observed in ole_object_candidates:
+            reference: dict[str, Any] = dict(observed)
+            reference.update({
+                "relationship_part": None,
+                "relationship_type": None,
+                "relationship_target": None,
+                "relationship_target_mode": None,
+                "relationship_status": "relationship_not_found",
+                "target_kind": None,
+                "target_scheme": None,
+                "embedded_part": None,
+                "embedded_part_present": False,
+                "embedded_part_ambiguous": False,
+                "embedded_content_status": "not_inspected",
+                "embedded_content_skip_reason": None,
+                "embedded_content_kind": None,
+                "embedded_content_signature": None,
+                "embedded_content_bytes_inspected": 0,
+            })
+
+            relationship_id = observed["relationship_id"]
+            matches = (
+                ole_relationships.get((observed["source_part"], relationship_id), [])
+                if relationship_id else []
+            )
+
+            if not relationship_id:
+                reference["relationship_status"] = "missing_relationship_id"
+            elif len(matches) > 1:
+                reference["relationship_status"] = "ambiguous_relationship"
+            elif len(matches) == 1:
+                relationship = matches[0]
+                target = relationship["target"]
+                target_mode = relationship["target_mode"]
+                reference.update({
+                    "relationship_part": relationship["source_relationship_part"],
+                    "relationship_type": relationship["relationship_type"],
+                    "relationship_target": target,
+                    "relationship_target_mode": target_mode or "Internal",
+                })
+
+                if target_mode.casefold() == "external":
+                    target_kind, target_scheme = _classify_external_target(target)
+                    reference.update({
+                        "relationship_status": "external_target",
+                        "target_kind": target_kind,
+                        "target_scheme": target_scheme,
+                    })
+                else:
+                    embedded_part = _resolve_internal_relationship_target(
+                        observed["source_part"], target
+                    )
+                    if embedded_part is None:
+                        reference.update({
+                            "relationship_status": "unsafe_target",
+                            "target_kind": "invalid_package_target",
+                        })
+                    else:
+                        part_present = embedded_part in package_member_names
+                        part_ambiguous = embedded_part in duplicate_names
+                        reference.update({
+                            "relationship_status": (
+                                "ambiguous_embedded_part"
+                                if part_ambiguous
+                                else "linked" if part_present else "embedded_part_missing"
+                            ),
+                            "target_kind": "package_part",
+                            "embedded_part": embedded_part,
+                            "embedded_part_present": part_present,
+                            "embedded_part_ambiguous": part_ambiguous,
+                        })
+                        if part_ambiguous:
+                            partial = True
+                            warnings.append(
+                                "An OLE embedded package member has an ambiguous duplicate "
+                                "name and was not inspected."
+                            )
+                        if part_present and not part_ambiguous:
+                            if embedded_part in encrypted_names:
+                                reference["embedded_content_status"] = "skipped_encrypted"
+                                reference["embedded_content_skip_reason"] = (
+                                    "encrypted_member"
+                                )
+                                partial = True
+                                warnings.append(
+                                    "An OLE embedded package member is encrypted and "
+                                    "was not read for signature inspection."
+                                )
+                            else:
+                                embedded_info = info_by_name[embedded_part]
+                                compression_ratio_exceeded = embedded_info.file_size and (
+                                    not embedded_info.compress_size
+                                    or embedded_info.file_size / embedded_info.compress_size
+                                    > MAX_COMPRESSION_RATIO
+                                )
+                                if compression_ratio_exceeded:
+                                    reference["embedded_content_status"] = (
+                                        "skipped_compression_ratio"
+                                    )
+                                    reference["embedded_content_skip_reason"] = (
+                                        "compression_ratio_limit"
+                                    )
+                                    partial = True
+                                    warnings.append(
+                                        "An OLE embedded package member was skipped because "
+                                        "its declared compression ratio exceeds the configured limit."
+                                    )
+                                else:
+                                    try:
+                                        with archive.open(embedded_info, "r") as embedded_stream:
+                                            prefix = embedded_stream.read(
+                                                MAX_EMBEDDED_SIGNATURE_BYTES
+                                            )
+                                        if len(prefix) > embedded_info.file_size:
+                                            raise ValueError(
+                                                "Embedded member exceeded its declared size"
+                                            )
+                                    except NotImplementedError:
+                                        reference["embedded_content_status"] = (
+                                            "skipped_unsupported_compression"
+                                        )
+                                        reference["embedded_content_skip_reason"] = (
+                                            "unsupported_compression_method"
+                                        )
+                                        partial = True
+                                        warnings.append(
+                                            "An OLE embedded package member was skipped because "
+                                            "its ZIP compression method is unsupported."
+                                        )
+                                    except (
+                                        zipfile.BadZipFile,
+                                        OSError,
+                                        RuntimeError,
+                                        ValueError,
+                                        zlib.error,
+                                        EOFError,
+                                    ):
+                                        reference["embedded_content_status"] = "read_failed"
+                                        partial = True
+                                        warnings.append(
+                                            "An OLE embedded package member could not be read "
+                                            "for bounded signature inspection."
+                                        )
+                                    else:
+                                        reference["embedded_content_bytes_inspected"] = len(prefix)
+                                        identified = _identify_embedded_content(prefix)
+                                        if identified:
+                                            reference["embedded_content_status"] = "identified"
+                                            reference["embedded_content_kind"] = identified[0]
+                                            reference["embedded_content_signature"] = identified[1]
+                                        else:
+                                            reference["embedded_content_status"] = (
+                                                "empty" if not prefix else "unrecognized"
+                                            )
+
+            if reference["relationship_status"] not in {"linked", "external_target"}:
+                unresolved_ole_references = True
+            ole_object_references.append(reference)
+
+        if ole_object_references_truncated:
+            warnings.append(
+                f"OLE-object reference inventory was capped at {MAX_OLE_OBJECT_REFERENCES} entries."
+            )
+        if ole_relationships_truncated:
+            warnings.append(
+                f"Internal OLE relationship inventory was capped at {MAX_OLE_RELATIONSHIP_ENTRIES} entries."
+            )
+        if unresolved_ole_references:
+            warnings.append(
+                "Some OLE-object references could not be linked unambiguously to a package relationship."
+            )
+
         package_status = "partial" if partial else "parsed"
         warnings.append("Office structure and relationships are contextual observations; they are not a malware verdict.")
-        warnings.append("Macros, scripts, hyperlinks, external relationships, and embedded objects were not executed, opened, extracted to disk, or fetched.")
+        warnings.append(
+            "Macros and scripts were not executed. Hyperlink and external relationship "
+            "targets were not opened or fetched. Embedded objects were not executed or "
+            "extracted to disk; linked internal OLE payloads may be read only as bounded "
+            "prefixes for signature identification."
+        )
         if features["vba_project_present"]:
             warnings.append("A VBA project binary is present; its code was not executed or decompiled by this analyzer.")
             if not macro_enabled_format:
@@ -763,6 +1121,9 @@ def analyze_office(
                 "extension_matches_detected_format": extension_matches,
                 "features": features,
                 "external_relationships": relationships,
+                "ole_object_references": ole_object_references,
+                "ole_object_references_truncated": ole_object_references_truncated,
+                "ole_relationship_inventory_truncated": ole_relationships_truncated,
                 "parts_inventory": inspected_part_names[:MAX_PART_EXAMPLES],
                 "warnings": list(dict.fromkeys(warnings)),
             },
