@@ -8,6 +8,8 @@ from __future__ import annotations
 from collections import Counter
 from typing import Any
 
+from .coverage import build_parser_coverage
+
 _ABSENCE_CAVEAT = (
     "No recorded indicator means only that no supported indicator was observed within "
     "the inspected scope; it does not establish that the file is safe."
@@ -766,6 +768,7 @@ def finalize_evidence_traceability(report: dict[str, Any]) -> None:
         "absence_of_findings_means": _ABSENCE_CAVEAT,
         "interpretation": "Coverage status describes the declared static inspection only; it is not a safety determination.",
         "feature_assessments": feature_assessments,
+        "parser_coverage": build_parser_coverage(report, section_name, parser_report),
     }
 
     # The normal Markdown/HTML report already renders warnings. Add concise coverage

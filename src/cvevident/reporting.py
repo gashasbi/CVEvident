@@ -500,6 +500,39 @@ def to_markdown(report: dict[str, Any]) -> str:
                 if basis.get("interpretation"):
                     lines.append(f"    - Interpretation: {_report_single_line(basis['interpretation'])}")
     lines += ["", "Association ordering is for review only; it is not a calibrated probability or proof of exploitability."]
+    parser_coverage = (report.get("analysis_coverage") or {}).get("parser_coverage") or {}
+    if parser_coverage:
+        lines += ["", "## Parser coverage", ""]
+        lines.append(
+            f"- Parser: `{_report_single_line(parser_coverage.get('parser_section') or 'unknown')}`; "
+            f"family: `{_report_single_line(parser_coverage.get('parser_family') or 'unknown')}`; "
+            f"overall coverage: `{_report_single_line(parser_coverage.get('overall_status') or 'unknown')}`."
+        )
+        lines += ["", "| Domain | Status | Inspected | Observed | Limit reached |", "|---|---|---:|---:|---|"]
+        coverage_notes: list[str] = []
+        for domain, details in (parser_coverage.get("domains") or {}).items():
+            inspected = _report_single_line(
+                f"{details.get('inspected_count', 0)} {details.get('inspected_unit', 'units')}"
+            )
+            observed = details.get("observed_count")
+            observed_text = "not reported" if observed is None else str(observed)
+            lines.append(
+                f"| `{_report_single_line(domain)}` | "
+                f"`{_report_single_line(details.get('status') or 'unknown')}` | "
+                f"{inspected} | {_report_single_line(observed_text)} | "
+                f"{str(bool(details.get('limit_reached'))).lower()} |"
+            )
+            for limitation in details.get("limitations", []) or []:
+                coverage_notes.append(
+                    f"- `{_report_single_line(domain)}`: {_report_single_line(limitation)}"
+                )
+        if coverage_notes:
+            lines += ["", *coverage_notes]
+        lines.append(
+            "Coverage describes completion within each declared static inspection scope; "
+            "it is not a safety or exploitability determination."
+        )
+
     feature_assessments = (report.get("analysis_coverage") or {}).get(
         "feature_assessments", []
     )

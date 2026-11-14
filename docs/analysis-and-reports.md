@@ -32,6 +32,30 @@ The exact fields depend on the document family and on what could be inspected. C
 
 Parser-specific sections such as `structural_analysis`, `office_analysis`, `legacy_office_analysis`, `odf_analysis`, or `rtf_analysis` appear when relevant. These sections should be interpreted in the context of their warnings and scope declarations.
 
+## Unified parser coverage
+
+Every analyzed report includes `analysis_coverage.parser_coverage`, regardless of which supported parser was selected. It uses the same domain names and status vocabulary for PDF, OOXML, OpenDocument, legacy OLE/CFB Office, and RTF:
+
+- `format_identification` — whether the input was identified as a supported format;
+- `container_structure` — inspection of the format's structural container or syntax;
+- `content_inspection` — bounded static inspection of the content representation supported by that parser;
+- `embedded_object_inventory` — inventory or indicators for embedded objects;
+- `external_reference_inventory` — inventory or indicators for external references;
+- `active_content_indicators` — static indicators for macros, scripts, actions, fields, or related content;
+- `semantic_interpretation` — full semantic interpretation, which is currently reported as `not_inspected` and excluded from the declared static-scope overall status.
+
+Each domain reports `status`, `in_declared_scope`, `inspected_count`, `inspected_unit`, `observed_count`, `limit_reached`, `scope`, and `limitations`. The `observed_count` is an indicator count, not a count of malicious objects. Some domains aggregate multiple indicator counters, which can overlap and do not represent unique objects; `observed_count_semantics` explains the count. A zero count does not prove absence outside the inspected scope.
+
+Normalized domain statuses are:
+
+- `complete` — the parser completed that domain within its declared static scope;
+- `partial` — some inspection was performed, but a parser warning or limit prevents a completeness claim;
+- `not_inspected` — the domain was not examined, including deliberately out-of-scope semantic interpretation;
+- `not_applicable` — the domain does not apply to the selected format;
+- `failed`, `unavailable`, `unsupported`, or `unknown` — the parser could not provide a reliable result for that domain.
+
+`overall_status` summarizes only domains marked `in_declared_scope`. The existing `analysis_coverage` fields, including `parser_status`, `complete_for_declared_static_scope`, and `feature_assessments`, remain available for compatibility. `parser_coverage` is the normalized cross-parser view; its `complete` status does not mean full semantic validation or file safety.
+
 ## Verdicts and parser status are different
 
 CVEvident uses a cautious assessment model. The overall verdict is generally `not_assessed`: parser observations are not sufficient to decide that a file is malicious or safe. A parser's status describes its own inspection result; it is not a malware verdict.

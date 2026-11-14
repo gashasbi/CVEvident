@@ -179,6 +179,24 @@ class ProjectAcceptanceClosureTests(unittest.TestCase):
                 self.assertIn("evidence_traceability", report)
 
                 coverage = report["analysis_coverage"]
+                parser_coverage = coverage.get("parser_coverage")
+                self.assertIsInstance(parser_coverage, dict)
+                self.assertEqual(
+                    set(parser_coverage.get("domains", {})),
+                    {
+                        "format_identification",
+                        "container_structure",
+                        "content_inspection",
+                        "embedded_object_inventory",
+                        "external_reference_inventory",
+                        "active_content_indicators",
+                        "semantic_interpretation",
+                    },
+                )
+                self.assertEqual(
+                    parser_coverage["parser_family"],
+                    {"pdf": "pdf", "docx": "ooxml", "odt": "odf", "doc": "legacy_office", "rtf": "rtf"}[expected_type],
+                )
                 assessments = coverage.get("feature_assessments")
                 self.assertIsInstance(assessments, list)
                 parser_section = coverage.get("parser_section")
