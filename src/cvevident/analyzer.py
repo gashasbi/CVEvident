@@ -8,7 +8,8 @@ from typing import Any
 
 from . import __version__
 from .db import connect
-from .evidence_engine import build_cve_associations, build_product_context, evidence_summary
+from .evidence_engine import build_cve_associations, build_environment_context, build_product_context, evidence_summary
+from .correlation import correlate_evidence_rules
 from .evidence_trace import append_product_context_evidence, append_reported_source_evidence, finalize_evidence_traceability
 from .file_input import read_prefix
 from .pdf_triage import analyze_pdf
@@ -16,7 +17,7 @@ from .office_triage import LEGACY_OFFICE_EXTENSIONS, OFFICE_EXTENSIONS, analyze_
 from .legacy_office_triage import OLE_SIGNATURE, analyze_legacy_office
 from .odf_triage import ODF_EXTENSIONS, analyze_opendocument
 from .rtf_triage import RTF_EXTENSIONS, analyze_rtf, has_rtf_signature
-from .store import lookup_reference_samples
+from .store import get_cve, lookup_reference_samples
 
 
 def _now() -> str:
@@ -26,7 +27,8 @@ def _now() -> str:
 def analyze_file(path: str | Path, db_path: str | Path | None = None,
                  target_product: str | None = None, max_bytes: int = 100 * 1024 * 1024,
                  candidate_limit: int = 10, target_vendor: str | None = None,
-                 target_version: str | None = None) -> dict[str, Any]:
+                 target_version: str | None = None,
+                 environment_cpes: list[str] | None = None) -> dict[str, Any]:
     input_path = Path(path).expanduser()
     suffix = input_path.suffix.lower()
     try:
@@ -131,20 +133,47 @@ def analyze_file(path: str | Path, db_path: str | Path | None = None,
                 "interpretation": sample["interpretation"],
             },
         })
+    database_path = str(db_path) if db_path else None
     report["target_context"] = build_product_context(
-        target_product, str(db_path) if db_path else None, candidate_limit,
+        target_product, database_path, candidate_limit,
         target_vendor=target_vendor, target_version=target_version,
     )
     append_product_context_evidence(report)
     append_reported_source_evidence(report)
     finalize_evidence_traceability(report)
+    report["evidence_correlation"] = correlate_evidence_rules(report, database_path)
+    rule_cve_records: dict[str, dict[str, Any]] = {}
+    environment_candidate_ids = {
+        str(candidate.get("cve_id") or "").upper()
+        for candidate in report["target_context"].get("candidate_cves", [])
+    }
+    environment_candidate_ids.update(
+        str(link.get("cve_id") or "").upper()
+        for sample in report["reference_sample_matches"]
+        for link in sample.get("cve_links", []) or []
+    )
+    for result in report["evidence_correlation"].get("cve_results", []):
+        cve_id = result["cve_id"]
+        environment_candidate_ids.add(cve_id)
+        record = get_cve(cve_id, database_path)
+        if record:
+            rule_cve_records[cve_id] = record
+    report["environment_context"] = build_environment_context(
+        environment_cpes, database_path, candidate_limit,
+        sorted(environment_candidate_ids),
+    )
     report["cve_associations"] = build_cve_associations(
-        report["reference_sample_matches"], report["target_context"]
+        report["reference_sample_matches"],
+        report["target_context"],
+        report["evidence_correlation"],
+        report["environment_context"],
+        rule_cve_records,
     )
     report["cve_association_policy"] = (
-        "Candidate relations are separated by basis. Exact SHA-256 matches identify registered sample bytes; "
-        "linked CVEs retain the sample metadata's provenance and verification status. Product-context matches "
-        "are lexical retrieval results only. None of these relations alone proves exploitability."
+        "Association bases remain separate: exact SHA-256 sample links, lexical product retrieval, "
+        "supplied environment CPE applicability, and source-backed parser evidence rules. MATCH means "
+        "the configured evidence rule and environment applicability both matched; it is not proof "
+        "of exploitability, document safety, or successful exploitation."
     )
     report["evidence_summary"] = evidence_summary(report["evidence"])
     # Store full report context as well as normalized evidence rows. This supports later report replay.
@@ -186,6 +215,8 @@ def analyze_file(path: str | Path, db_path: str | Path | None = None,
                  json.dumps({
                      "association_basis_types": candidate["association_basis_types"],
                      "association_bases": bases,
+                     "correlation_status": candidate.get("correlation_status", "UNKNOWN"),
+                     "correlation_interpretation": candidate.get("correlation_interpretation"),
                      "score_semantics": score_semantics,
                      "score_is_probability": False,
                  }, ensure_ascii=False)),

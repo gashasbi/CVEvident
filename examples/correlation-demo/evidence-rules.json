@@ -1,0 +1,18 @@
+{
+  "rules": [
+    {
+      "rule_id": "demo-rtf-header-observation",
+      "cve_id": "CVE-2099-12345",
+      "parser_family": "rtf",
+      "evidence_type": "rtf_structure",
+      "evidence_key": "rtf.header",
+      "value_equals": "found",
+      "coverage_domain": "container_structure",
+      "source_name": "CVEvident synthetic demonstration fixture",
+      "source_url": "https://example.invalid/cvevident-demo",
+      "evidence_basis": "Synthetic test relationship. This rule exists only to exercise exact observation matching and does not describe a real vulnerability.",
+      "confidence": "high",
+      "verified": false
+    }
+  ]
+}

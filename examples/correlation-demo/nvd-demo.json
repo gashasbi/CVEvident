@@ -1,0 +1,33 @@
+{
+  "vulnerabilities": [
+    {
+      "cve": {
+        "id": "CVE-2099-12345",
+        "published": "2099-01-01T00:00:00.000Z",
+        "lastModified": "2099-01-02T00:00:00.000Z",
+        "descriptions": [
+          {
+            "lang": "en",
+            "value": "Synthetic CVE record used only to test CVEvident correlation workflow."
+          }
+        ],
+        "configurations": [
+          {
+            "operator": "OR",
+            "nodes": [
+              {
+                "operator": "OR",
+                "cpeMatch": [
+                  {
+                    "criteria": "cpe:2.3:a:acme:reader:2.4:*:*:*:*:*:*:*",
+                    "vulnerable": true
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

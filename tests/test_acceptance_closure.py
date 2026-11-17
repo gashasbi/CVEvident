@@ -361,7 +361,7 @@ class ProjectAcceptanceClosureTests(unittest.TestCase):
 
     def test_package_version_and_database_schema_remain_at_the_declared_baseline(self) -> None:
         self.assertEqual(__version__, "0.1.0")
-        self.assertEqual(SCHEMA_VERSION, 2)
+        self.assertEqual(SCHEMA_VERSION, 3)
 
     def test_configured_file_size_limit_is_enforced_before_persistent_analysis(self) -> None:
         path = self._write("oversized.rtf", b"{\\rtf1\\ansi " + b"A" * 4096 + b"}")

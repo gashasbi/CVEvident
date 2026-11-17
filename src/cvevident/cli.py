@@ -17,7 +17,7 @@ from .progress import progress
 from .sources import sync_epss, sync_kev, sync_nvd_modified, sync_nvd_year, sync_nvd_years
 from .store import (
     get_analysis, get_cve, get_stats, get_source_freshness, import_epss_csv, import_kev_json,
-    import_nvd_json, import_reference_samples_json, search_cves, search_product_cves,
+    import_nvd_json, import_reference_samples_json, import_evidence_rules_json, search_cves, search_product_cves,
 )
 
 
@@ -55,6 +55,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("import-epss", help="Import a downloaded FIRST EPSS CSV or CSV.GZ file")
     p.add_argument("csv_file")
     p = sub.add_parser("import-samples", help="Import curated reference-sample metadata from JSON (not file bytes)")
+    p.add_argument("json_file")
+    p = sub.add_parser("import-evidence-rules", help="Import source-backed parser evidence rules from JSON")
     p.add_argument("json_file")
 
     p = sub.add_parser("sync-kev", help="Download and import the free CISA KEV catalog")
@@ -97,6 +99,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("file")
     p.add_argument("--target-vendor", help="Optional exact vendor filter for product-context retrieval")
     p.add_argument("--target-version", help="Optional installed/product version for conservative CPE version context")
+    p.add_argument("--environment-cpe", action="append", default=[], help="Target environment CPE 2.3 identifier; may be repeated")
     p.add_argument("--target-product", help="Product context for local affected-product CPE retrieval")
     p.add_argument("--output", help="Report path; use '-' or omit to print")
     p.add_argument("--format", choices=("json", "markdown", "html"), default="json")
@@ -109,6 +112,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--reports-dir", help="Optional directory for individual JSON reports")
     p.add_argument("--target-vendor", help="Optional exact vendor filter for product-context retrieval")
     p.add_argument("--target-version", help="Optional product version for conservative CPE version context")
+    p.add_argument("--environment-cpe", action="append", default=[], help="Target environment CPE 2.3 identifier; may be repeated")
     p.add_argument("--output", help="Summary JSON path; use '-' or omit to print")
     p.add_argument("--target-product", help="Product context for local affected-product CPE retrieval")
     p.add_argument("--max-bytes", type=int, default=100 * 1024 * 1024)
@@ -315,6 +319,7 @@ def _analyze_batch(args: argparse.Namespace, db_path: str | Path) -> dict[str, A
                 file_path, db_path, args.target_product,
                 args.max_bytes, args.candidate_limit,
                 target_vendor=args.target_vendor, target_version=args.target_version,
+                environment_cpes=args.environment_cpe,
             )
         except Exception as exc:
             results.append(_batch_error_result(file_path, "analysis", exc))
@@ -423,6 +428,8 @@ def main(argv: list[str] | None = None) -> int:
             _dump({"source": "FIRST EPSS", "records_imported": imported})
         elif args.command == "import-samples":
             _dump({"source": "curated reference samples", "samples_imported": import_reference_samples_json(args.json_file, db_path)})
+        elif args.command == "import-evidence-rules":
+            _dump({"source": "curated parser evidence rules", "rules_imported": import_evidence_rules_json(args.json_file, db_path)})
         elif args.command == "sync-kev":
             with progress("Downloading and importing CISA KEV"):
                 imported = sync_kev(db_path, args.cache_file)
@@ -509,6 +516,7 @@ def main(argv: list[str] | None = None) -> int:
             report = analyze_file(
                 args.file, db_path, args.target_product, args.max_bytes, args.candidate_limit,
                 target_vendor=args.target_vendor, target_version=args.target_version,
+                environment_cpes=args.environment_cpe,
             )
             _write_output(_render(report, args.format), args.output)
             return 1 if _report_analysis_failure(report) else 0

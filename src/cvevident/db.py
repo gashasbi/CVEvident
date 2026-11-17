@@ -5,7 +5,7 @@ import os
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA = r"""
 PRAGMA foreign_keys = ON;
@@ -141,6 +141,24 @@ CREATE TABLE IF NOT EXISTS source_observations (
     source_record_json TEXT NOT NULL DEFAULT '{}',
     UNIQUE(cve_id, source_name, source_updated_at)
 );
+CREATE TABLE IF NOT EXISTS evidence_rules (
+    rule_id TEXT PRIMARY KEY,
+    cve_id TEXT NOT NULL REFERENCES vulnerabilities(cve_id) ON DELETE CASCADE,
+    parser_family TEXT NOT NULL,
+    evidence_type TEXT NOT NULL,
+    evidence_key TEXT NOT NULL,
+    value_equals_json TEXT,
+    coverage_domain TEXT,
+    source_name TEXT NOT NULL,
+    source_url TEXT NOT NULL,
+    evidence_basis TEXT NOT NULL,
+    confidence TEXT NOT NULL DEFAULT 'unknown' CHECK(confidence IN ('verified','high','medium','low','unknown')),
+    verified INTEGER NOT NULL DEFAULT 0 CHECK(verified IN (0,1)),
+    enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_evidence_rules_cve ON evidence_rules(cve_id, enabled);
+CREATE INDEX IF NOT EXISTS idx_evidence_rules_observation ON evidence_rules(parser_family, evidence_type, evidence_key, enabled);
 """
 
 

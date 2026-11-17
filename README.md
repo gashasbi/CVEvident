@@ -11,7 +11,8 @@ It is not a malware verdict engine, a dynamic sandbox, a document renderer, or p
 - **Static file triage:** examines PDF, modern Office Open XML, legacy OLE/CFB Office, OpenDocument, and RTF files within configured resource limits.
 - **Content-aware identification:** uses file signatures and package metadata where available instead of trusting the filename alone; mismatches and incomplete parsing are reported.
 - **Evidence and traceability:** records file identity, parser observations, bounded structural findings, warnings, and source-location details when the parser can provide them.
-- **Local CVE context:** searches vulnerability and affected-product records imported from NVD, CISA's Known Exploited Vulnerabilities (KEV) catalog, and FIRST EPSS data. Product-context results explain lexical match signals, version context, ranking inputs, and identity ambiguity without claiming that the file is affected.
+- **Local CVE context:** searches vulnerability and affected-product records imported from NVD, CISA's Known Exploited Vulnerabilities (KEV) catalog, and FIRST EPSS data. When target environment CPEs are supplied, analysis evaluates the stored NVD configuration tree with `AND`/`OR` logic and preserves indeterminate conditions as unknown.
+- **Source-backed evidence correlation:** optional curated rules connect exact parser observations to individual CVEs and retain the advisory source, evidence basis, confidence, and verification state. Generic feature-to-CVE assumptions are not made.
 - **Exact reference-sample matching:** can compare a file's SHA-256 with metadata registered in a local reference-sample collection. This is an exact byte-identity match, not a conclusion about related files.
 - **Reusable reports:** emits JSON, Markdown, or HTML reports and stores analysis records and evidence in SQLite for later retrieval.
 - **Batch workflows:** analyzes multiple files or directories, tracks per-file failures, and can write individual JSON reports plus a summary.
@@ -86,7 +87,16 @@ cvevident analyze ./document.pdf \
   --format json --output ./reports/document.json
 ```
 
-The optional product fields are used to retrieve local affected-product context. They do not assert that the analyzed file contains or belongs to that product.
+The optional product fields retrieve local affected-product context. `--environment-cpe` supplies one or more CPE 2.3 identifiers for the target environment and enables evaluation of the locally stored NVD configuration tree. An applicable result describes the supplied environment only; it does not assert that the analyzed file contains the product or meets an exploit precondition.
+
+For environment applicability, supply one or more CPE 2.3 identifiers:
+
+```bash
+cvevident analyze ./document.docm \
+  --environment-cpe 'cpe:2.3:a:acme:reader:2.4:*:*:*:*:*:*:*' \
+  --environment-cpe 'cpe:2.3:o:microsoft:windows_10:10:*:*:*:*:*:*:*' \
+  --format json
+```
 
 ### Analyze a directory
 
@@ -130,7 +140,21 @@ cvevident show-cve CVE-2024-12345
 cvevident search-product "Acme Reader" --vendor acme --version 2.4
 ```
 
-The CVE identifier above is an illustrative command argument; use the identifier you actually want to look up. Product search is based on local affected-product CPE fields and uses conservative matching. Its ranking score is a retrieval-relevance score, not a probability. The `ranking_explanation`, `applicability_context`, and `query_ambiguity` fields explain the match and its limitations; they do not establish product presence in the file or prove file vulnerability. The tool does not evaluate the full NVD applicability tree. See [Local CVE data](docs/local-cve-data.md) and [Analysis and reports](docs/analysis-and-reports.md).
+The CVE identifier above is an illustrative command argument; use the identifier you actually want to look up. Product search is based on local affected-product CPE fields and uses conservative matching. Its ranking score is a retrieval-relevance score, not a probability. `search-product` remains a retrieval command; file analysis evaluates the full locally stored NVD configuration tree only when target environment CPEs are supplied. See [Local CVE data](docs/local-cve-data.md), [Analysis and reports](docs/analysis-and-reports.md), and [CVE evidence rules](docs/cve-evidence-rules.md).
+
+## Test the CVE correlation workflow
+
+A self-contained demonstration is included in `examples/correlation-demo`. It creates a temporary database, imports a synthetic NVD-shaped CVE record and a synthetic evidence rule, then runs three analyses. The expected combined results are `MATCH`, `NO_MATCH`, and `PARTIAL`.
+
+Run it from the project root:
+
+```bash
+bash examples/correlation-demo/run.sh
+```
+
+All demonstration records are synthetic and do not describe a real vulnerability or advisory. The script removes its temporary database and reports when it finishes. Set `KEEP_DEMO_OUTPUT=1` to preserve the generated reports and database.
+
+See [CVE evidence rules](docs/cve-evidence-rules.md) for the rule format and the limits of interpreting correlation results.
 
 ## Command overview
 
@@ -146,6 +170,7 @@ The CVE identifier above is an illustrative command argument; use the identifier
 | `import-kev` | Import a local CISA KEV JSON file |
 | `import-epss` | Import a local FIRST EPSS CSV or CSV.GZ file |
 | `import-samples` | Import reference-sample metadata (not sample bytes) |
+| `import-evidence-rules` | Import source-backed parser-observation-to-CVE rules |
 | `sync-nvd` | Synchronize recently modified NVD records |
 | `sync-nvd-year` / `sync-nvd-years` | Download, verify, and import annual NVD feeds |
 | `sync-kev` / `sync-epss` | Download and import the current KEV or EPSS dataset |
@@ -160,6 +185,7 @@ The global `--db` option must appear before the command, for example `cvevident 
 - [Getting started](docs/getting-started.md) — installation, first analysis, and common workflows
 - [Supported formats](docs/supported-formats.md) — supported families and what is inspected
 - [Analysis and reports](docs/analysis-and-reports.md) — evidence, statuses, report formats, and replay
+- [CVE evidence rules](docs/cve-evidence-rules.md) — source-backed parser rules and environment applicability
 - [Local CVE data](docs/local-cve-data.md) — imports, synchronization, freshness, and product-context limits
 - [Office Open XML triage](docs/office-triage.md) — package structure, indicators, and boundaries
 - [Legacy Office, OpenDocument, and RTF](docs/legacy-and-open-document-triage.md) — scope of the other document parsers
@@ -171,7 +197,7 @@ The global `--db` option must appear before the command, for example `cvevident 
 2. **Evidence before conclusions:** the report describes observed structures and data provenance rather than making a malware verdict.
 3. **Bounded inspection:** input size, archive contents, parser traversal, and displayed examples have limits.
 4. **Honest uncertainty:** unsupported or incomplete paths are reported instead of being silently treated as fully analyzed.
-5. **Separate evidence bases:** exact sample-hash matches and product-context CVE retrieval are kept distinct.
+5. **Separate evidence bases:** exact sample-hash matches, product retrieval, environment applicability, and parser evidence rules are kept distinct.
 
 ## License
 

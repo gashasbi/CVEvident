@@ -935,6 +935,95 @@ def get_cve(cve_id: str, db_path: str | Path | None = None) -> dict[str, Any] | 
         return result
 
 
+def import_evidence_rules_json(path: str | Path, db_path: str | Path | None = None) -> int:
+    path = Path(path).expanduser()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Could not read evidence-rule JSON: {exc}") from exc
+    rules = payload.get("rules") if isinstance(payload, dict) else None
+    if not isinstance(rules, list):
+        raise ValueError("Expected JSON object with a 'rules' array")
+    allowed_families = {"pdf", "ooxml", "legacy_office", "odf", "rtf"}
+    allowed_confidence = {"verified", "high", "medium", "low", "unknown"}
+    allowed_domains = {
+        "container_structure",
+        "content_inspection",
+        "embedded_object_inventory",
+        "external_reference_inventory",
+        "active_content_indicators",
+    }
+    count = 0
+    with connect(db_path) as conn:
+        for index, rule in enumerate(rules, start=1):
+            if not isinstance(rule, dict):
+                raise ValueError(f"Rule {index} must be a JSON object")
+            required = (
+                "rule_id", "cve_id", "parser_family", "evidence_type",
+                "evidence_key", "source_name", "source_url", "evidence_basis",
+            )
+            if any(not isinstance(rule.get(key), str) or not rule[key].strip() for key in required):
+                raise ValueError(f"Rule {index} requires non-empty string fields: {', '.join(required)}")
+            rule_id = rule["rule_id"].strip()
+            cve_id = rule["cve_id"].strip().upper()
+            family = rule["parser_family"].strip().lower()
+            confidence = str(rule.get("confidence", "unknown")).strip().lower()
+            coverage_domain = rule.get("coverage_domain")
+            verified = rule.get("verified", False)
+            enabled = rule.get("enabled", True)
+            if not isinstance(enabled, bool):
+                raise ValueError(f"enabled must be a boolean in rule {rule_id}")
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", rule_id):
+                raise ValueError(f"Invalid rule_id: {rule_id}")
+            if not CVE_RE.fullmatch(cve_id):
+                raise ValueError(f"Invalid CVE ID in rule {rule_id}: {cve_id}")
+            if family not in allowed_families:
+                raise ValueError(f"Unsupported parser_family in rule {rule_id}: {family}")
+            if len(rule["evidence_type"]) > 128 or len(rule["evidence_key"]) > 512:
+                raise ValueError(f"Evidence identifiers are too long in rule {rule_id}")
+            if len(rule["source_name"]) > 256 or len(rule["source_url"]) > 2048:
+                raise ValueError(f"Source fields are too long in rule {rule_id}")
+            if len(rule["evidence_basis"]) > 4000:
+                raise ValueError(f"evidence_basis is too long in rule {rule_id}")
+            if confidence not in allowed_confidence:
+                raise ValueError(f"Unsupported confidence in rule {rule_id}: {confidence}")
+            if coverage_domain is not None and (
+                not isinstance(coverage_domain, str) or coverage_domain not in allowed_domains
+            ):
+                raise ValueError(f"Unsupported coverage_domain in rule {rule_id}: {coverage_domain}")
+            if not isinstance(verified, bool):
+                raise ValueError(f"verified must be a boolean in rule {rule_id}")
+            if conn.execute("SELECT 1 FROM vulnerabilities WHERE cve_id=?", (cve_id,)).fetchone() is None:
+                raise ValueError(f"CVE {cve_id} must be imported before rule {rule_id}")
+            expected = rule.get("value_equals")
+            expected_json = (
+                json.dumps(expected, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                if "value_equals" in rule else None
+            )
+            conn.execute(
+                """INSERT INTO evidence_rules
+                   (rule_id,cve_id,parser_family,evidence_type,evidence_key,value_equals_json,
+                    coverage_domain,source_name,source_url,evidence_basis,confidence,verified,enabled,created_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(rule_id) DO UPDATE SET
+                    cve_id=excluded.cve_id,parser_family=excluded.parser_family,
+                    evidence_type=excluded.evidence_type,evidence_key=excluded.evidence_key,
+                    value_equals_json=excluded.value_equals_json,coverage_domain=excluded.coverage_domain,
+                    source_name=excluded.source_name,source_url=excluded.source_url,
+                    evidence_basis=excluded.evidence_basis,confidence=excluded.confidence,
+                    verified=excluded.verified,enabled=excluded.enabled""",
+                (
+                    rule_id, cve_id, family, rule["evidence_type"].strip(),
+                    rule["evidence_key"].strip(), expected_json, coverage_domain,
+                    rule["source_name"].strip(), rule["source_url"].strip(),
+                    rule["evidence_basis"].strip(), confidence, int(verified),
+                    int(enabled), utc_now(),
+                ),
+            )
+            count += 1
+    return count
+
+
 def import_reference_samples_json(path: str | Path, db_path: str | Path | None = None) -> int:
     """Import curated sample metadata; input JSON never contains or executes sample bytes.
 
@@ -1044,6 +1133,7 @@ def get_stats(db_path: str | Path | None = None) -> dict[str, Any]:
             "evidence_items": conn.execute("SELECT COUNT(*) FROM evidence").fetchone()[0],
             "reference_samples": conn.execute("SELECT COUNT(*) FROM reference_samples").fetchone()[0],
             "sample_cve_links": conn.execute("SELECT COUNT(*) FROM sample_vulnerability_links").fetchone()[0],
+            "evidence_rules": conn.execute("SELECT COUNT(*) FROM evidence_rules WHERE enabled=1").fetchone()[0],
             "schema_version": conn.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0],
         }
         counts["sources"] = [dict(row) for row in conn.execute("SELECT * FROM source_sync ORDER BY source").fetchall()]

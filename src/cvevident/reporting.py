@@ -402,12 +402,16 @@ def to_markdown(report: dict[str, Any]) -> str:
         lines.append(str(association_policy).replace("\r", " ").replace("\n", " "))
     associations = report.get("cve_associations", [])
     if not associations:
-        lines += ["", "No CVE association candidates were generated from the available sample links and product context."]
+        lines += ["", "No CVE association candidates were generated from the available sample links, product context, environment CPEs, or parser evidence rules."]
     else:
         for candidate in associations:
             cve_id = _report_single_line(candidate.get("cve_id", "unknown"))
             assessment_text = _report_single_line(candidate.get("assessment", "candidate_not_file_attribution"))
-            lines.append(f"- **{cve_id}** — `{assessment_text}`")
+            correlation_status = _report_single_line(candidate.get("correlation_status", "UNKNOWN"))
+            lines.append(f"- **{cve_id}** — association: `{assessment_text}`; correlation: `{correlation_status}`")
+            interpretation = _report_single_line(candidate.get("correlation_interpretation", ""))
+            if interpretation:
+                lines.append(f"  - {interpretation}")
             description = _report_single_line(candidate.get("description", ""))
             if description:
                 lines.append(f"  - Description: {description[:400]}{'…' if len(description) > 400 else ''}")
@@ -557,6 +561,52 @@ def to_markdown(report: dict[str, Any]) -> str:
             )
             for limitation in assessment.get("analysis_limitations", []) or []:
                 lines.append(f"  - Limitation: {_report_single_line(limitation)}")
+
+    environment_context = report.get("environment_context") or {}
+    environment_cpes = environment_context.get("environment_cpes", []) or []
+    lines += ["", "## Environment CPE applicability", ""]
+    if not environment_cpes:
+        lines.append("No environment CPE was supplied; platform applicability remains unknown.")
+    else:
+        lines.extend(f"- `{_report_single_line(value)}`" for value in environment_cpes)
+        if environment_context.get("invalid_environment_cpes"):
+            lines.append("Invalid CPE values: " + ", ".join(
+                f"`{_report_single_line(value)}`" for value in environment_context["invalid_environment_cpes"]
+            ))
+        for candidate in environment_context.get("candidate_cves", []) or []:
+            applicability = candidate.get("applicability") or {}
+            lines.append(
+                f"- **{_report_single_line(candidate.get('cve_id'))}** — "
+                f"`{_report_single_line(applicability.get('status', 'unknown'))}`: "
+                f"{_report_single_line(applicability.get('interpretation', ''))}"
+            )
+
+    correlation = report.get("evidence_correlation") or {}
+    lines += ["", "## Source-backed parser evidence correlation", ""]
+    lines.append(_report_single_line(correlation.get("interpretation", "No evidence-rule evaluation was available.")))
+    rule_results = correlation.get("cve_results", []) or []
+    if not rule_results:
+        lines.append("No imported evidence rules applied to this parser family.")
+    else:
+        for result in rule_results:
+            lines.append(
+                f"- **{_report_single_line(result.get('cve_id'))}** — "
+                f"`{_report_single_line(result.get('status', 'UNKNOWN'))}`; "
+                f"{len(result.get('matched_rules', []) or [])} matched rule(s), "
+                f"{len(result.get('unmatched_rules', []) or [])} unmatched rule(s)."
+            )
+            for rule in result.get("matched_rules", []) or []:
+                lines.append(
+                    f"  - Rule `{_report_single_line(rule.get('rule_id'))}` matched "
+                    f"evidence `{_report_single_line(rule.get('evidence_id') or 'unlinked')}`; "
+                    f"source: {_report_single_line(rule.get('source_name'))}; "
+                    f"confidence: `{_report_single_line(rule.get('confidence'))}`; "
+                    f"verified: `{bool(rule.get('verified'))}`."
+                )
+                if rule.get("source_url"):
+                    lines.append(f"  Source URL: `{_report_single_line(rule.get('source_url'))}`")
+                if rule.get("evidence_basis"):
+                    lines.append(f"  Evidence basis: {_report_single_line(rule.get('evidence_basis'))}")
 
     lines += ["", "## Warnings", ""]
     lines.extend(

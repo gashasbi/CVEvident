@@ -28,8 +28,9 @@ An input over the configured input-byte limit is rejected instead of being read 
 - **A finding is not a verdict.** Structural markers can be present in benign files and absent from files that deserve investigation.
 - **No finding is not proof of safety.** The parser's declared scope is limited and some content is intentionally not decoded or interpreted.
 - **Entropy is not maliciousness.** Entropy describes byte distribution and is not semantic similarity or a malware classifier.
-- **A CVE candidate is not file attribution.** Product-context searches are lexical retrieval over local affected-product data; they do not prove the identity of the analyzed file or that it is affected.
+- **A CVE candidate is not file attribution.** Product-context searches are lexical retrieval over local affected-product data. Environment CPE evaluation describes only the operator-supplied target environment. Source-backed parser rules establish only the documented relationship between an exact observation and a CVE. None of these results alone proves the file is vulnerable or that exploitation succeeds.
 - **A sample label depends on provenance.** An exact SHA-256 match identifies the same bytes as a registered sample. It does not independently validate the sample label or the provenance of linked CVEs.
+- **Curated rules require review.** Rule imports retain the supplied source and evidence basis, but CVEvident does not independently validate the advisory or the operator's interpretation.
 - **Data freshness is local.** Search results reflect what has been imported into the local database; unimported or stale data can be missing.
 - **Exit status is not severity.** A nonzero CLI exit code can mean that a parser or an output operation failed. A report may still be saved when a parser reports failure; interpret parser-specific status fields and warnings separately from the command exit code.
 

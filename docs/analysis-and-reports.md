@@ -77,22 +77,31 @@ The exit code describes the command's processing outcome; it is not a malware ve
 
 When `--output PATH` is supplied, a successful write prints a small JSON confirmation to standard output instead of printing the full report there. Consequently, a parser failure can return `1` while the requested report file was still written successfully. Read the report's parser status and warnings as well as the exit code.
 
-## Evidence bases must remain distinct
+## CVE correlation and applicability
 
-CVEvident may report two different kinds of CVE-related context:
+CVEvident keeps four independent association bases:
 
 1. **Exact reference-sample match:** the analyzed file's SHA-256 exactly matches a registered sample metadata record. This identifies the same bytes as that sample record. The quality and meaning of any label or CVE link depend on the source and provenance stored with that record.
-2. **Product-context retrieval:** a user-supplied product name, optional vendor, and optional version are compared with locally imported affected-product records. This is a candidate retrieval result, not proof that the file is the product, contains the product, or is affected by the CVE.
+2. **Product-context retrieval:** a user-supplied product name, optional vendor, and optional version are compared with locally imported affected-product records. This is a candidate retrieval result, not proof that the file is the product or is affected by the CVE.
+3. **Environment CPE applicability:** one or more operator-supplied target CPE 2.3 identifiers are evaluated against the locally stored NVD configuration tree. The evaluator preserves NVD `AND`, `OR`, and `negate` relationships and uses three-valued logic. Exact CPE components and simple dotted-numeric version ranges are supported; unsupported version syntax, invalid CPEs, and missing configuration data remain unknown. This result applies to the supplied environment, not to the file.
+4. **Source-backed parser evidence rules:** imported rules connect an exact parser evidence type/key (and optional exact value) to a CVE using a cited advisory or other reviewed source. A positive match retains the evidence ID, source, confidence, and verification state. A missing observation is `NO_MATCH` only when its declared parser coverage domain is complete; otherwise it remains `UNKNOWN`.
 
-These bases are intentionally kept separate. CVE links from sample metadata retain their recorded provenance and verification state; lexical product matches are not converted into file attribution. KEV and EPSS are vulnerability-level signals, not document evidence.
+The combined `correlation_status` is:
+
+- `MATCH` only when at least one source-backed parser rule matches and the supplied environment is applicable;
+- `PARTIAL` when one side matches but the other side is unknown or not configured;
+- `NO_MATCH` when the evaluated rule or environment conditions contradict the configured relationship;
+- `UNKNOWN` when the available data cannot support a determination.
+
+These statuses describe the configured correlation criteria only. They do not establish that the file is malicious, that the file itself is the vulnerable product, or that an exploit succeeds. A generic marker such as VBA, OLE, JavaScript, or an external link is never mapped to a CVE unless an explicit source-backed rule has been imported. KEV and EPSS remain vulnerability-level signals, not document evidence.
 
 Product-context results include three explanation areas:
 
 - `ranking_explanation` reports the name-match class, matching vendor/product terms, version-match status, lexical relevance score, KEV/EPSS values, and the sort order used for retrieval. The score is not a probability, confidence estimate, or exploitability rating.
-- `applicability_context` shows the NVD CPE vulnerable flag and explicitly records that nested NVD configuration logic, product presence in the analyzed file, and file vulnerability have not been established by this search.
+- `applicability_context` explains the CPE row used for retrieval. It is not the complete NVD configuration result; the latter is reported separately when `--environment-cpe` is supplied.
 - `query_ambiguity` summarizes distinct vendor/product identities found across matching CPE rows before the result limit is applied. The displayed identity list can be truncated for large result sets.
 
-Read these fields as explanations of how a local retrieval candidate was selected, not as an applicability determination for the file.
+Read [CVE evidence rules](cve-evidence-rules.md) for the rule format, import command, exact matching behavior, and environment CPE examples.
 
 ## Replay a saved report
 

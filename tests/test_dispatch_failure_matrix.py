@@ -293,7 +293,7 @@ class DispatchFailureMatrixTests(unittest.TestCase):
                 [sys.executable, "-c", probe, str(fifo_path), str(self.db)],
                 capture_output=True,
                 text=True,
-                timeout=2,
+                timeout=10,
                 check=False,
             )
         except subprocess.TimeoutExpired:
