@@ -1099,7 +1099,7 @@ def import_reference_samples_json(path: str | Path, db_path: str | Path | None =
     with connect(db_path) as conn:
         for sample_index, sample in enumerate(samples, start=1):
             if not isinstance(sample, dict):
-                continue
+                raise ValueError(f"Sample {sample_index} must be a JSON object")
             required = ("sample_id", "sha256", "file_type", "label", "source_name", "label_basis")
             if any(not isinstance(sample.get(key), str) or not sample[key].strip() for key in required):
                 raise ValueError(f"Each sample requires non-empty string fields: {', '.join(required)}")
@@ -1130,13 +1130,20 @@ def import_reference_samples_json(path: str | Path, db_path: str | Path | None =
                 raise ValueError(f"cve_links for sample {sample['sample_id']} must be an array")
             for link_index, link in enumerate(raw_links, start=1):
                 if not isinstance(link, dict):
-                    continue
+                    raise ValueError(
+                        f"CVE link {link_index} for sample {sample['sample_id']} must be a JSON object"
+                    )
                 cve_id = str(link.get("cve_id", "")).upper()
                 if not CVE_RE.fullmatch(cve_id):
                     raise ValueError(f"Invalid CVE ID in sample {sample['sample_id']}: {cve_id}")
                 link_confidence = str(link.get("confidence", "unknown")).lower()
                 if link_confidence not in {"verified", "high", "medium", "low", "unknown"}:
                     raise ValueError(f"Unsupported confidence value in sample CVE link: {link_confidence}")
+                verified = link.get("verified", False)
+                if not isinstance(verified, bool):
+                    raise ValueError(
+                        f"verified must be a boolean for CVE link {link_index} in sample {sample['sample_id']}"
+                    )
                 if not conn.execute("SELECT 1 FROM vulnerabilities WHERE cve_id=?", (cve_id,)).fetchone():
                     raise ValueError(f"CVE {cve_id} must be imported before linking sample {sample['sample_id']}")
                 conn.execute(
@@ -1146,7 +1153,7 @@ def import_reference_samples_json(path: str | Path, db_path: str | Path | None =
                        source_url=excluded.source_url""",
                     (sample["sample_id"], cve_id, str(link.get("association_type", "reported")),
                      str(link.get("evidence_basis", "")), link_confidence,
-                     int(bool(link.get("verified", False))), link.get("source_url")),
+                     int(verified), link.get("source_url")),
                 )
             count += 1
     return count
