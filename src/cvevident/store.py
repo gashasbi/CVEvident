@@ -445,8 +445,25 @@ def import_epss_csv(path: str | Path, db_path: str | Path | None = None) -> int:
     skipped_invalid_rows = 0
     try:
         with _open_maybe_gzip(source_path) as handle, connect(db_path) as conn:
-            data_lines = (line for line in handle if line.strip() and not line.lstrip().startswith("#"))
-            reader = csv.DictReader(data_lines)
+            epss_metadata: dict[str, str] = {}
+
+            def data_lines():
+                for line in handle:
+                    stripped = line.strip()
+                    if not stripped:
+                        continue
+                    if stripped.startswith("#"):
+                        for item in stripped[1:].split(","):
+                            if ":" not in item:
+                                continue
+                            key, value = item.split(":", 1)
+                            key = key.strip().lower()
+                            if key in {"model_version", "score_date"} and value.strip():
+                                epss_metadata[key] = value.strip()[:100]
+                        continue
+                    yield line
+
+            reader = csv.DictReader(data_lines())
             required = {"cve", "epss", "percentile"}
             if not reader.fieldnames or not required.issubset({x.strip().lower() for x in reader.fieldnames}):
                 raise ValueError("Expected FIRST EPSS CSV columns: cve, epss, percentile")
@@ -475,6 +492,11 @@ def import_epss_csv(path: str | Path, db_path: str | Path | None = None) -> int:
                 )
                 count += 1
             details = f"Imported {source_path.name}; valid_rows={count}; skipped_invalid_rows={skipped_invalid_rows}"
+            if epss_metadata:
+                metadata_details = "; ".join(
+                    f"{key}={value}" for key, value in sorted(epss_metadata.items())
+                )
+                details += f"; {metadata_details}"
             _update_source_sync(
                 conn, "FIRST EPSS", count, details,
                 status="partial" if skipped_invalid_rows else "success",
