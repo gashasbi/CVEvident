@@ -134,11 +134,24 @@ def correlate_evidence_rules(report: dict[str, Any], db_path: str | None = None)
         else:
             item["status"] = "NO_MATCH"
         matched = item["matched_rules"]
-        verified_matches = [rule for rule in matched if rule.get("verified") is True]
-        unverified_matches = [rule for rule in matched if rule.get("verified") is not True]
+        successful_group_keys = {
+            str(group["group_id"]) if group.get("group_id") else
+            f"__single_rule__:{group['members'][0]['rule_id']}"
+            for group in group_results
+            if group["status"] == "MATCH"
+        }
+        validated_matches = [
+            rule for rule in matched
+            if (
+                str(rule.get("group_id")) if rule.get("group_id") else
+                f"__single_rule__:{rule['rule_id']}"
+            ) in successful_group_keys
+        ]
+        verified_matches = [rule for rule in validated_matches if rule.get("verified") is True]
+        unverified_matches = [rule for rule in validated_matches if rule.get("verified") is not True]
         item["validation_status"] = (
             "mixed_verified_and_unverified" if verified_matches and unverified_matches else
-            "verified" if verified_matches else "unverified" if matched else "not_applicable"
+            "verified" if verified_matches else "unverified" if unverified_matches else "not_applicable"
         )
         item["verified_match_count"] = len(verified_matches)
         item["unverified_match_count"] = len(unverified_matches)

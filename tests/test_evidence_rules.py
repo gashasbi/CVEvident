@@ -241,5 +241,51 @@ class EvidenceRuleTests(unittest.TestCase):
             import_evidence_rules_json(self.write_json("mixed-group.json", rules), self.db)
 
 
+    def test_and_group_requires_every_observation_and_respects_coverage(self):
+        rules = {"rules": [
+            {"rule_id":"group-vba","group_id":"office-chain","group_operator":"AND","cve_id":"CVE-2099-12345","parser_family":"ooxml","evidence_type":"office_structural_feature","evidence_key":"office.structure.vba_project_present","coverage_domain":"active_content_indicators","source_name":"Vendor advisory","source_url":"https://example.test/advisory","evidence_basis":"First required observation."},
+            {"rule_id":"group-activex","group_id":"office-chain","group_operator":"AND","cve_id":"CVE-2099-12345","parser_family":"ooxml","evidence_type":"office_structural_feature","evidence_key":"office.structure.activex_present","coverage_domain":"active_content_indicators","source_name":"Vendor advisory","source_url":"https://example.test/advisory","evidence_basis":"Second required observation."},
+        ]}
+        import_evidence_rules_json(self.write_json("and-rules.json", rules), self.db)
+        base = {"office_analysis":{"status":"parsed"},"analysis_coverage":{"parser_coverage":{"domains":{"active_content_indicators":{"status":"complete"}}}}}
+        one = {**base,"evidence":[{"evidence_type":"office_structural_feature","key":"office.structure.vba_project_present","value":True}]}
+        result = correlate_evidence_rules(one, str(self.db))["cve_results"][0]
+        self.assertEqual(result["status"], "NO_MATCH")
+        self.assertEqual(result["validation_status"], "not_applicable")
+        self.assertEqual(result["rule_groups"][0]["operator"], "AND")
+        self.assertEqual(result["rule_groups"][0]["status"], "NO_MATCH")
+        both = {**base,"evidence":[
+            {"evidence_type":"office_structural_feature","key":"office.structure.vba_project_present","value":True},
+            {"evidence_type":"office_structural_feature","key":"office.structure.activex_present","value":True},
+        ]}
+        result = correlate_evidence_rules(both, str(self.db))["cve_results"][0]
+        self.assertEqual(result["status"], "MATCH")
+        self.assertEqual(result["rule_groups"][0]["status"], "MATCH")
+
+    def test_and_group_is_unknown_when_missing_observation_has_incomplete_coverage(self):
+        rules = {"rules": [
+            {"rule_id":"partial-vba","group_id":"partial-chain","group_operator":"AND","cve_id":"CVE-2099-12345","parser_family":"ooxml","evidence_type":"office_structural_feature","evidence_key":"present","coverage_domain":"active_content_indicators","source_name":"Source","source_url":"https://example.test/a","evidence_basis":"First."},
+            {"rule_id":"partial-activex","group_id":"partial-chain","group_operator":"AND","cve_id":"CVE-2099-12345","parser_family":"ooxml","evidence_type":"office_structural_feature","evidence_key":"missing","coverage_domain":"active_content_indicators","source_name":"Source","source_url":"https://example.test/a","evidence_basis":"Second."},
+        ]}
+        import_evidence_rules_json(self.write_json("partial-and-rules.json", rules), self.db)
+        report = {"office_analysis":{"status":"partial"},"analysis_coverage":{"parser_coverage":{"domains":{"active_content_indicators":{"status":"partial"}}}},"evidence":[{"evidence_type":"office_structural_feature","key":"present","value":True}]}
+        result = correlate_evidence_rules(report, str(self.db))["cve_results"][0]
+        self.assertEqual(result["status"], "UNKNOWN")
+        self.assertEqual(result["rule_groups"][0]["status"], "UNKNOWN")
+        self.assertEqual(result["validation_status"], "not_applicable")
+
+    def test_or_group_matches_when_any_member_matches(self):
+        rules = {"rules": [
+            {"rule_id":"or-vba","group_id":"alternative-features","group_operator":"OR","cve_id":"CVE-2099-12345","parser_family":"ooxml","evidence_type":"office_structural_feature","evidence_key":"present","coverage_domain":"active_content_indicators","source_name":"Source","source_url":"https://example.test/a","evidence_basis":"First."},
+            {"rule_id":"or-activex","group_id":"alternative-features","group_operator":"OR","cve_id":"CVE-2099-12345","parser_family":"ooxml","evidence_type":"office_structural_feature","evidence_key":"alternative","coverage_domain":"active_content_indicators","source_name":"Source","source_url":"https://example.test/a","evidence_basis":"Second."},
+        ]}
+        import_evidence_rules_json(self.write_json("or-rules.json", rules), self.db)
+        report = {"office_analysis":{"status":"parsed"},"analysis_coverage":{"parser_coverage":{"domains":{"active_content_indicators":{"status":"complete"}}}},"evidence":[{"evidence_type":"office_structural_feature","key":"present","value":True}]}
+        result = correlate_evidence_rules(report, str(self.db))["cve_results"][0]
+        self.assertEqual(result["status"], "MATCH")
+        self.assertEqual(result["rule_groups"][0]["operator"], "OR")
+        self.assertEqual(result["rule_groups"][0]["status"], "MATCH")
+
+
 if __name__ == "__main__":
     unittest.main()
