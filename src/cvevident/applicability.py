@@ -238,10 +238,14 @@ def compare_cpe23(source_text: str, target_text: str) -> dict[str, Any]:
         relation = "superset"
     else:
         relation = "undefined"
+    reported_relations = {
+        field: value if value is not None else "undefined"
+        for field, value in relations.items()
+    }
 
     return {
         "relation": relation,
-        "attribute_relations": relations,
+        "attribute_relations": reported_relations,
     }
 
 
