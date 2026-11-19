@@ -598,6 +598,13 @@ def to_markdown(report: dict[str, Any]) -> str:
                 f"{len(result.get('matched_rules', []) or [])} matched rule(s), "
                 f"{len(result.get('unmatched_rules', []) or [])} unmatched rule(s)."
             )
+            for group in result.get("rule_groups", []) or []:
+                lines.append(
+                    f"  - Rule group `{_report_single_line(group.get('group_id') or 'independent-rule')}` "
+                    f"(`{_report_single_line(group.get('operator', 'OR'))}`) — "
+                    f"`{_report_single_line(group.get('status', 'UNKNOWN'))}`; "
+                    f"{group.get('matched_rule_count', 0)}/{group.get('member_count', 0)} member(s) matched."
+                )
             for rule in result.get("matched_rules", []) or []:
                 lines.append(
                     f"  - Rule `{_report_single_line(rule.get('rule_id'))}` matched "

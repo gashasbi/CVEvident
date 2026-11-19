@@ -209,5 +209,37 @@ class EvidenceRuleTests(unittest.TestCase):
         self.assertIn("none is independently marked verified", item["interpretation"])
 
 
+    def test_existing_schema_migrates_evidence_rule_group_columns(self):
+        import sqlite3
+
+        old_db = self.root / "schema-v3.sqlite3"
+        with sqlite3.connect(old_db) as conn:
+            conn.execute("CREATE TABLE schema_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            conn.execute("INSERT INTO schema_meta(key,value) VALUES('schema_version','3')")
+            conn.execute("""CREATE TABLE evidence_rules(
+                rule_id TEXT PRIMARY KEY, cve_id TEXT NOT NULL, parser_family TEXT NOT NULL,
+                evidence_type TEXT NOT NULL, evidence_key TEXT NOT NULL, value_equals_json TEXT,
+                coverage_domain TEXT, source_name TEXT NOT NULL, source_url TEXT NOT NULL,
+                evidence_basis TEXT NOT NULL, confidence TEXT NOT NULL DEFAULT 'unknown',
+                verified INTEGER NOT NULL DEFAULT 0, enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL
+            )""")
+        init_db(old_db)
+        with connect(old_db) as conn:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(evidence_rules)")}
+            version = conn.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0]
+        self.assertIn("group_id", columns)
+        self.assertIn("group_operator", columns)
+        self.assertEqual(version, "4")
+
+    def test_group_rejects_mixed_parser_families(self):
+        rules = {"rules": [
+            {"rule_id":"mixed-one","group_id":"mixed-group","group_operator":"AND","cve_id":"CVE-2099-12345","parser_family":"ooxml","evidence_type":"feature","evidence_key":"one","source_name":"Source","source_url":"https://example.test/a","evidence_basis":"First."},
+            {"rule_id":"mixed-two","group_id":"mixed-group","group_operator":"AND","cve_id":"CVE-2099-12345","parser_family":"rtf","evidence_type":"feature","evidence_key":"two","source_name":"Source","source_url":"https://example.test/a","evidence_basis":"Second."},
+        ]}
+        with self.assertRaisesRegex(ValueError, "share CVE, parser_family, and group_operator"):
+            import_evidence_rules_json(self.write_json("mixed-group.json", rules), self.db)
+
+
 if __name__ == "__main__":
     unittest.main()

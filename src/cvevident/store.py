@@ -1122,6 +1122,8 @@ def import_evidence_rules_json(path: str | Path, db_path: str | Path | None = No
             coverage_domain = rule.get("coverage_domain")
             verified = rule.get("verified", False)
             enabled = rule.get("enabled", True)
+            group_id = rule.get("group_id")
+            group_operator = rule.get("group_operator")
             if not isinstance(enabled, bool):
                 raise ValueError(f"enabled must be a boolean in rule {rule_id}")
             if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", rule_id):
@@ -1144,6 +1146,24 @@ def import_evidence_rules_json(path: str | Path, db_path: str | Path | None = No
                 raise ValueError(f"Unsupported coverage_domain in rule {rule_id}: {coverage_domain}")
             if not isinstance(verified, bool):
                 raise ValueError(f"verified must be a boolean in rule {rule_id}")
+            if group_id is not None:
+                if not isinstance(group_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", group_id):
+                    raise ValueError(f"Invalid group_id in rule {rule_id}")
+                if not isinstance(group_operator, str) or group_operator.upper() not in {"AND", "OR"}:
+                    raise ValueError(f"group_operator must be AND or OR when group_id is set in rule {rule_id}")
+                group_operator = group_operator.upper()
+                existing_group_rows = conn.execute(
+                    "SELECT DISTINCT cve_id,parser_family,group_operator FROM evidence_rules WHERE group_id=? AND rule_id<>?",
+                    (group_id, rule_id),
+                ).fetchall()
+                if any(
+                    row["cve_id"] != cve_id or row["parser_family"] != family
+                    or str(row["group_operator"] or "").upper() != group_operator
+                    for row in existing_group_rows
+                ):
+                    raise ValueError(f"All rules in group {group_id} must share CVE, parser_family, and group_operator")
+            elif group_operator is not None:
+                raise ValueError(f"group_operator requires group_id in rule {rule_id}")
             if conn.execute("SELECT 1 FROM vulnerabilities WHERE cve_id=?", (cve_id,)).fetchone() is None:
                 raise ValueError(f"CVE {cve_id} must be imported before rule {rule_id}")
             expected = rule.get("value_equals")
@@ -1154,21 +1174,23 @@ def import_evidence_rules_json(path: str | Path, db_path: str | Path | None = No
             conn.execute(
                 """INSERT INTO evidence_rules
                    (rule_id,cve_id,parser_family,evidence_type,evidence_key,value_equals_json,
-                    coverage_domain,source_name,source_url,evidence_basis,confidence,verified,enabled,created_at)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    coverage_domain,source_name,source_url,evidence_basis,confidence,verified,enabled,created_at,
+                    group_id,group_operator)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(rule_id) DO UPDATE SET
                     cve_id=excluded.cve_id,parser_family=excluded.parser_family,
                     evidence_type=excluded.evidence_type,evidence_key=excluded.evidence_key,
                     value_equals_json=excluded.value_equals_json,coverage_domain=excluded.coverage_domain,
                     source_name=excluded.source_name,source_url=excluded.source_url,
                     evidence_basis=excluded.evidence_basis,confidence=excluded.confidence,
-                    verified=excluded.verified,enabled=excluded.enabled""",
+                    verified=excluded.verified,enabled=excluded.enabled,
+                    group_id=excluded.group_id,group_operator=excluded.group_operator""",
                 (
                     rule_id, cve_id, family, rule["evidence_type"].strip(),
                     rule["evidence_key"].strip(), expected_json, coverage_domain,
                     rule["source_name"].strip(), rule["source_url"].strip(),
                     rule["evidence_basis"].strip(), confidence, int(verified),
-                    int(enabled), utc_now(),
+                    int(enabled), utc_now(), group_id, group_operator,
                 ),
             )
             count += 1
