@@ -1,9 +1,9 @@
-"""Bounded, static directory-level triage for legacy OLE/CFB Office files.
+"""Bounded, static triage for legacy OLE/CFB Office files.
 
-This module does not extract or interpret document stream bodies. It validates a
-bounded subset of the Compound File Binary container and inventories directory
-entry names/sizes to identify Word/Excel/PowerPoint families and macro/embedding
-indicators. It is not a full OLE parser or a malware verdict.
+This module validates a bounded subset of the Compound File Binary container,
+inventories directory entries, and parses limited VBA project metadata. It does
+not interpret document content or VBA source code and is not a full OLE parser
+or a malware verdict.
 """
 from __future__ import annotations
 
@@ -40,6 +40,177 @@ _MAX_DIRECTORY_BYTES = 8 * 1024 * 1024
 _MAX_DIRECTORY_ENTRIES = 65536
 _MAX_CHAIN_SECTORS = 200000
 _MAX_INVENTORY = 300
+
+
+def _decompress_vba_container(data: bytes, *, max_output: int = 1024 * 1024) -> bytes:
+    if not data or data[0] != 0x01:
+        raise ValueError("VBA compressed container signature is invalid")
+    if len(data) > _MAX_STREAM_BYTES:
+        raise ValueError("VBA compressed container exceeds the configured input limit")
+    output = bytearray()
+    position = 1
+    while position < len(data):
+        if len(data) - position < 2:
+            raise ValueError("VBA compressed chunk header is truncated")
+        header = struct.unpack_from("<H", data, position)[0]
+        chunk_size = (header & 0x0FFF) + 3
+        chunk_signature = (header >> 12) & 0x07
+        compressed = bool(header & 0x8000)
+        if chunk_signature != 0x03 or chunk_size < 3 or chunk_size > 4098:
+            raise ValueError("VBA compressed chunk header is invalid")
+        chunk_end = position + chunk_size
+        if chunk_end > len(data):
+            raise ValueError("VBA compressed chunk exceeds the available stream bytes")
+        chunk_position = position + 2
+        chunk_output = bytearray()
+        if not compressed:
+            if chunk_size != 4098:
+                raise ValueError("VBA raw chunk has an invalid declared size")
+            chunk_output.extend(data[chunk_position:chunk_end])
+            if len(chunk_output) != 4096:
+                raise ValueError("VBA raw chunk does not contain 4096 bytes")
+        else:
+            while chunk_position < chunk_end:
+                flags = data[chunk_position]
+                chunk_position += 1
+                for bit in range(8):
+                    if chunk_position >= chunk_end or len(chunk_output) >= 4096:
+                        break
+                    if flags & (1 << bit):
+                        if chunk_end - chunk_position < 2:
+                            raise ValueError("VBA copy token is truncated")
+                        token = struct.unpack_from("<H", data, chunk_position)[0]
+                        chunk_position += 2
+                        current = len(chunk_output)
+                        bit_count = max(4, (current - 1).bit_length())
+                        length_mask = 0xFFFF >> bit_count
+                        copy_offset = (token >> (16 - bit_count)) + 1
+                        copy_length = (token & length_mask) + 3
+                        if copy_offset > current or current + copy_length > 4096:
+                            raise ValueError("VBA copy token references bytes outside the current chunk")
+                        for _ in range(copy_length):
+                            chunk_output.append(chunk_output[-copy_offset])
+                    else:
+                        chunk_output.append(data[chunk_position])
+                        chunk_position += 1
+            if chunk_position != chunk_end:
+                raise ValueError("VBA compressed chunk contains unconsumed bytes")
+        if len(output) + len(chunk_output) > max_output:
+            raise ValueError("VBA decompressed data exceeds the configured output limit")
+        output.extend(chunk_output)
+        position = chunk_end
+    return bytes(output)
+
+
+def _parse_vba_module_block(data: bytes) -> list[dict[str, Any]]:
+    if len(data) > 1024 * 1024:
+        raise ValueError("VBA dir data exceeds the configured parsing limit")
+
+    def read_record(offset: int, expected_id: int | None = None) -> tuple[int, bytes, int]:
+        if offset < 0 or len(data) - offset < 6:
+            raise ValueError("VBA dir record header is truncated")
+        record_id, size = struct.unpack_from("<HI", data, offset)
+        end = offset + 6 + size
+        if end > len(data):
+            raise ValueError("VBA dir record exceeds the available data")
+        if expected_id is not None and record_id != expected_id:
+            raise ValueError(f"VBA dir record 0x{record_id:04X} does not match expected 0x{expected_id:04X}")
+        return record_id, data[offset + 6:end], end
+
+    candidates = []
+    candidate_attempts = 0
+    for offset in range(max(0, len(data) - 12)):
+        if data[offset:offset + 6] != b"\x0f\x00\x02\x00\x00\x00":
+            continue
+        candidate_attempts += 1
+        if candidate_attempts > 32:
+            break
+        try:
+            _, count_data, cursor = read_record(offset, 0x000F)
+            if len(count_data) != 2:
+                continue
+            module_count = struct.unpack("<H", count_data)[0]
+            if module_count > 4096:
+                continue
+            _, cookie_data, cursor = read_record(cursor, 0x0013)
+            if len(cookie_data) != 2:
+                continue
+            modules = []
+            seen_names = set()
+            for _ in range(module_count):
+                _, name_data, cursor = read_record(cursor, 0x0019)
+                if not name_data or len(name_data) > 4096:
+                    raise ValueError("VBA module name is empty or too long")
+                module_name = name_data.decode("cp1252", errors="replace")
+                if cursor + 6 <= len(data) and struct.unpack_from("<H", data, cursor)[0] == 0x0047:
+                    _, _, cursor = read_record(cursor, 0x0047)
+                _, stream_data, cursor = read_record(cursor, 0x001A)
+                if not stream_data or len(stream_data) > 4096:
+                    raise ValueError("VBA module stream name is empty or too long")
+                stream_name = stream_data.decode("cp1252", errors="replace")
+                if cursor + 6 > len(data) or struct.unpack_from("<H", data, cursor)[0] != 0x0032:
+                    raise ValueError("VBA module stream Unicode marker is missing")
+                _, stream_unicode, cursor = read_record(cursor, 0x0032)
+                if len(stream_unicode) % 2 or len(stream_unicode) > 8192:
+                    raise ValueError("VBA module stream Unicode name is invalid")
+                if stream_unicode:
+                    stream_name = stream_unicode.decode("utf-16le", errors="replace")
+                if cursor + 6 <= len(data) and struct.unpack_from("<H", data, cursor)[0] == 0x001C:
+                    _, _, cursor = read_record(cursor, 0x001C)
+                    if cursor + 6 > len(data) or struct.unpack_from("<H", data, cursor)[0] != 0x0048:
+                        raise ValueError("VBA module docstring Unicode marker is missing")
+                    _, _, cursor = read_record(cursor, 0x0048)
+                _, offset_data, cursor = read_record(cursor, 0x0031)
+                if len(offset_data) != 4:
+                    raise ValueError("VBA module source offset has an invalid size")
+                source_offset = struct.unpack("<I", offset_data)[0]
+                _, help_data, cursor = read_record(cursor, 0x001E)
+                if len(help_data) != 4:
+                    raise ValueError("VBA module help context has an invalid size")
+                _, cookie_data, cursor = read_record(cursor, 0x002C)
+                if len(cookie_data) != 2:
+                    raise ValueError("VBA module cookie has an invalid size")
+                module_type, type_data, cursor = read_record(cursor)
+                if module_type not in (0x0021, 0x0022) or type_data:
+                    raise ValueError("VBA module type record is invalid")
+                while cursor + 6 <= len(data):
+                    optional_id = struct.unpack_from("<H", data, cursor)[0]
+                    if optional_id not in (0x0025, 0x0028):
+                        break
+                    _, optional_data, cursor = read_record(cursor)
+                    if optional_data:
+                        raise ValueError("VBA optional module record has an invalid size")
+                if cursor + 6 > len(data) or struct.unpack_from("<H", data, cursor)[0] != 0x002B:
+                    raise ValueError("VBA module terminator is missing")
+                _, terminator_data, cursor = read_record(cursor, 0x002B)
+                if terminator_data:
+                    raise ValueError("VBA module terminator has an invalid size")
+                if len(data) - cursor < 4 or data[cursor:cursor + 4] != b"\x00\x00\x00\x00":
+                    raise ValueError("VBA module reserved field is invalid")
+                cursor += 4
+                normalized_stream = stream_name.casefold()
+                if normalized_stream in seen_names:
+                    raise ValueError("VBA module stream names are duplicated")
+                seen_names.add(normalized_stream)
+                modules.append({
+                    "name": module_name[:128],
+                    "stream_name": stream_name[:128],
+                    "source_offset": source_offset,
+                    "module_type": "procedural" if module_type == 0x0021 else "document_or_class",
+                })
+            if len(data) - cursor < 6 or struct.unpack_from("<H", data, cursor)[0] != 0x0010:
+                raise ValueError("VBA dir project terminator is missing")
+            _, terminator_data, cursor = read_record(cursor, 0x0010)
+            if terminator_data or len(data) - cursor < 4 or data[cursor:cursor + 4] != b"\x00\x00\x00\x00":
+                raise ValueError("VBA dir reserved terminator field is invalid")
+            candidates.append(modules)
+        except (ValueError, UnicodeError, struct.error):
+            continue
+    if not candidates:
+        raise ValueError("VBA dir module records could not be parsed")
+    if any(candidate != candidates[0] for candidate in candidates[1:]):
+        raise ValueError("VBA dir contains ambiguous module record sequences")
+    return candidates[0]
 
 
 def _safe_text(value: Any, limit: int = 240) -> str:
@@ -364,6 +535,58 @@ def _parse_directory(
             "child_id": struct.unpack_from("<I", raw, 76)[0],
         })
     return entries, truncated, warnings
+
+
+def _build_directory_parent_map(
+    entries: list[dict[str, Any]],
+    *,
+    directory_tree_valid: bool | None,
+) -> dict[int, int] | None:
+    if directory_tree_valid is not True:
+        return None
+
+    entries_by_id = {entry["index"]: entry for entry in entries}
+    root = entries_by_id.get(0)
+    if root is None or root["type"] != "root_storage":
+        return None
+
+    parent_by_id: dict[int, int] = {}
+    pending_storages = [0]
+    visited_storages: set[int] = set()
+    visited_entries: set[int] = set()
+
+    while pending_storages:
+        storage_id = pending_storages.pop()
+        if storage_id in visited_storages:
+            return None
+        visited_storages.add(storage_id)
+        storage = entries_by_id.get(storage_id)
+        if storage is None or storage["type"] not in ("storage", "root_storage"):
+            return None
+
+        tree_root = storage["child_id"]
+        if tree_root == _FREESECT:
+            continue
+        stack = [tree_root]
+        while stack:
+            entry_id = stack.pop()
+            if entry_id == _FREESECT:
+                continue
+            entry = entries_by_id.get(entry_id)
+            if entry is None or entry["type"] not in ("storage", "stream"):
+                return None
+            if entry_id in visited_entries or entry_id in parent_by_id:
+                return None
+            visited_entries.add(entry_id)
+            parent_by_id[entry_id] = storage_id
+            if entry["left_sibling_id"] != _FREESECT:
+                stack.append(entry["left_sibling_id"])
+            if entry["right_sibling_id"] != _FREESECT:
+                stack.append(entry["right_sibling_id"])
+            if entry["type"] == "storage":
+                pending_storages.append(entry_id)
+
+    return parent_by_id
 
 
 def _cfb_simple_upper_code_unit(code_unit: int) -> int:
@@ -1044,6 +1267,31 @@ def analyze_legacy_office(path: str, max_bytes: int = 100 * 1024 * 1024) -> dict
         status = "partial"
     stream_entries = [entry for entry in entries if entry["type"] == "stream"]
     storage_entries = [entry for entry in entries if entry["type"] in ("storage", "root_storage")]
+    parent_by_id = _build_directory_parent_map(
+        entries,
+        directory_tree_valid=(
+            directory_tree_valid
+            if not chain_partial and not entries_truncated and len(directory_bytes) % 128 == 0
+            else None
+        ),
+    )
+    entries_by_id = {entry["index"]: entry for entry in entries}
+    root_children = {
+        entry_id for entry_id, parent_id in (parent_by_id or {}).items()
+        if parent_id == 0
+    }
+    vba_storage_entries = [
+        entry for entry in entries
+        if entry["index"] in root_children
+        and entry["type"] == "storage"
+        and entry["name"].casefold() == "vba"
+    ]
+    vba_storage_for_read = vba_storage_entries[0] if len(vba_storage_entries) == 1 else None
+    vba_child_ids_for_read = {
+        entry_id for entry_id, parent_id in (parent_by_id or {}).items()
+        if vba_storage_for_read is not None and parent_id == vba_storage_for_read["index"]
+    }
+    vba_stream_data: dict[str, bytes] = {}
 
     # Read bounded stream contents only for structural validation. Raw bytes
     # are discarded immediately and are never included in the report.
@@ -1153,6 +1401,12 @@ def analyze_legacy_office(path: str, max_bytes: int = 100 * 1024 * 1024) -> dict
             stream_read_count += 1
 
         stream_inventory.append(item)
+        if (
+            not stream_partial
+            and entry["index"] in vba_child_ids_for_read
+            and len(vba_stream_data) < 256
+        ):
+            vba_stream_data[entry["name"].casefold()] = stream_data
         del stream_data
 
     if stream_inventory_truncated:
@@ -1168,7 +1422,102 @@ def analyze_legacy_office(path: str, max_bytes: int = 100 * 1024 * 1024) -> dict
     vba_related_names = {"vba", "dir", "_vba_project", "project", "projectwm", "projectlk"}
     stream_names = {entry["name"].casefold() for entry in stream_entries}
     storage_names = {entry["name"].casefold() for entry in storage_entries}
-    vba_present = "vba" in storage_names or {"_vba_project", "dir"}.issubset(stream_names)
+    vba_storage = vba_storage_for_read
+    root_project_stream_present = any(
+        entry_id in entries_by_id
+        and entries_by_id[entry_id]["type"] == "stream"
+        and entries_by_id[entry_id]["name"].casefold() == "project"
+        for entry_id in root_children
+    )
+    vba_children = {
+        entry_id for entry_id, parent_id in (parent_by_id or {}).items()
+        if vba_storage is not None and parent_id == vba_storage["index"]
+    }
+    vba_child_names = {
+        entries_by_id[entry_id]["name"].casefold()
+        for entry_id in vba_children
+        if entry_id in entries_by_id and entries_by_id[entry_id]["type"] == "stream"
+    }
+    vba_required_streams_present = {"_vba_project", "dir"}.issubset(vba_child_names)
+    vba_present = bool(
+        vba_storage and root_project_stream_present and vba_required_streams_present
+    )
+    if parent_by_id is None:
+        vba_structure_status = "indeterminate"
+    elif vba_present:
+        vba_structure_status = "required_entries_present"
+    elif vba_storage or "vba" in storage_names:
+        vba_structure_status = "incomplete"
+    else:
+        vba_structure_status = "not_found"
+
+    vba_dir_status = "not_available"
+    vba_modules: list[dict[str, Any]] = []
+    vba_module_streams_present = False
+    vba_module_streams_complete = False
+    if vba_present:
+        dir_data = vba_stream_data.get("dir")
+        if dir_data:
+            try:
+                decompressed_dir = _decompress_vba_container(dir_data)
+                vba_modules = _parse_vba_module_block(decompressed_dir)
+                vba_dir_status = "parsed"
+                module_entries_present = []
+                module_checks = []
+                for module in vba_modules:
+                    module_stream = vba_stream_data.get(module["stream_name"].casefold())
+                    module_entry = next((
+                        entry for entry in entries
+                        if entry["index"] in vba_child_ids_for_read
+                        and entry["type"] == "stream"
+                        and entry["name"].casefold() == module["stream_name"].casefold()
+                    ), None)
+                    if module_entry is None:
+                        module_entries_present.append(False)
+                        module_checks.append(False)
+                        continue
+                    module_entries_present.append(True)
+                    stream_size = module_entry["declared_size_bytes"]
+                    source_offset = module["source_offset"]
+                    module_checks.append(
+                        module_stream is not None
+                        and source_offset < stream_size
+                        and len(module_stream) == stream_size
+                        and module_stream[source_offset:source_offset + 1] == b"\x01"
+                    )
+                vba_module_streams_present = (
+                    bool(vba_modules)
+                    and len(module_entries_present) == len(vba_modules)
+                    and all(module_entries_present)
+                )
+                vba_module_streams_complete = (
+                    bool(vba_modules)
+                    and len(module_checks) == len(vba_modules)
+                    and all(module_checks)
+                )
+            except ValueError as exc:
+                vba_dir_status = "invalid"
+                warnings.append(f"VBA dir stream could not be validated: {_safe_text(exc)}.")
+        else:
+            vba_dir_status = "unavailable"
+
+    if parent_by_id is None:
+        vba_validation_status = "indeterminate"
+    elif not vba_storage:
+        vba_validation_status = "not_found"
+    elif not vba_present:
+        vba_validation_status = "incomplete"
+    elif vba_dir_status == "invalid":
+        vba_validation_status = "invalid_dir_stream"
+    elif vba_dir_status != "parsed":
+        vba_validation_status = "dir_stream_unavailable"
+    elif not vba_module_streams_present:
+        vba_validation_status = "module_streams_missing"
+    elif not vba_module_streams_complete:
+        vba_validation_status = "module_streams_unverified"
+    else:
+        vba_validation_status = "module_streams_confirmed"
+
     encrypted_container = {"encryptedpackage", "encryptioninfo"}.issubset(names)
     embedded_entries = [entry for entry in entries if (
         entry["name"].casefold().startswith("mbd") or entry["name"].casefold() in {"objectpool", "ole10native"}
@@ -1182,6 +1531,14 @@ def analyze_legacy_office(path: str, max_bytes: int = 100 * 1024 * 1024) -> dict
         "vba_directory_stream_name_present": "dir" in stream_names,
         "vba_project_metadata_stream_name_present": "project" in stream_names,
         "vba_storage_name_present": "vba" in storage_names,
+        "vba_storage_at_root_present": vba_storage is not None,
+        "vba_required_streams_present": bool(vba_required_streams_present),
+        "vba_root_project_stream_present": bool(root_project_stream_present),
+        "vba_dir_stream_parsed": vba_dir_status == "parsed",
+        "vba_module_count": len(vba_modules),
+        "vba_module_streams_present": bool(vba_module_streams_present),
+        "vba_module_streams_complete": bool(vba_module_streams_complete),
+        "vba_project_metadata_validated": vba_validation_status == "module_streams_confirmed",
         "vba_project_workspace_stream_name_present": "projectwm" in stream_names,
         "vba_project_link_stream_name_present": "projectlk" in stream_names,
         "embedded_object_indicator_count": len(embedded_entries),
@@ -1215,7 +1572,26 @@ def analyze_legacy_office(path: str, max_bytes: int = 100 * 1024 * 1024) -> dict
             partial = True
             status = "partial"
 
-    warnings.append("CFB stream bodies were read only within strict resource limits for structural validation; VBA source and embedded content were not interpreted or executed.")
+    if vba_present:
+        if vba_dir_status == "parsed" and vba_module_streams_complete:
+            warnings.append(
+                "VBA dir records were parsed and every declared module stream was found with a bounded "
+                "source-container signature check; module source code was not decompressed or interpreted."
+            )
+        elif vba_dir_status == "parsed":
+            warnings.append(
+                "VBA dir records were parsed, but one or more declared module streams could not be confirmed; "
+                "full VBA project validity is unverified."
+            )
+        else:
+            warnings.append(
+                "VBA root and storage hierarchy entries are present, but the dir stream could not be fully parsed; "
+                "full VBA project validity is unverified."
+            )
+    warnings.append(
+        "CFB stream bodies were read only within strict resource limits for structural validation; "
+        "VBA source and embedded content were not interpreted or executed."
+    )
     if family is None and status == "unsupported":
         warnings.insert(0, message)
 
@@ -1254,6 +1630,15 @@ def analyze_legacy_office(path: str, max_bytes: int = 100 * 1024 * 1024) -> dict
             "root_directory_entry_valid": root_directory_entry_valid,
             "truncated": bool(partial or entries_truncated or inventory_truncated),
             "macro_enabled_format": bool(vba_present), "vba_project_present": bool(vba_present),
+            "vba_project_structure_status": vba_structure_status,
+            "vba_project_validation_status": vba_validation_status,
+            "vba_dir_stream_status": vba_dir_status,
+            "vba_module_count": len(vba_modules),
+            "vba_modules": [
+                {"name": module["name"], "stream_name": module["stream_name"],
+                 "source_offset": module["source_offset"], "module_type": module["module_type"]}
+                for module in vba_modules[:256]
+            ],
             "encrypted_content_present": bool(encrypted_container),
             "extension_matches_detected_family": extension_matches,
             "features": features,
@@ -1272,8 +1657,22 @@ def analyze_legacy_office(path: str, max_bytes: int = 100 * 1024 * 1024) -> dict
     }
     for key, value in features.items():
         if value:
+            if key in {
+                "vba_dir_stream_parsed", "vba_module_count",
+                "vba_module_streams_present", "vba_module_streams_complete",
+                "vba_project_metadata_validated",
+            }:
+                interpretation = (
+                    "Bounded VBA metadata or module-stream structure observation; "
+                    "VBA source code was not interpreted or executed."
+                )
+            else:
+                interpretation = (
+                    "Directory-name or container-structure indicator only; "
+                    "it is not proof of maliciousness."
+                )
             report["evidence"].append({
                 "evidence_type": "legacy_office_indicator", "key": f"legacy_office.{key}", "value": value,
-                "severity": "info", "details": {"context_only": True, "interpretation": "Directory-name indicator only; stream content was not inspected."},
+                "severity": "info", "details": {"context_only": True, "interpretation": interpretation},
             })
     return report

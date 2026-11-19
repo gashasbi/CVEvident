@@ -3,7 +3,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from cvevident.legacy_office_triage import OLE_SIGNATURE, analyze_legacy_office
+from cvevident.legacy_office_triage import (
+    OLE_SIGNATURE,
+    _decompress_vba_container,
+    _parse_vba_module_block,
+    analyze_legacy_office,
+)
 
 FREE = 0xFFFFFFFF
 EOC = 0xFFFFFFFE
@@ -203,6 +208,215 @@ def build_cfb_with_root_tree(names, *, major=3):
     return bytes(data)
 
 
+def build_cfb_with_hierarchy(names, parents, *, major=3):
+    data = bytearray(build_cfb(names, major=major))
+    if not names or names[0][1] != 5:
+        raise ValueError("The first directory entry must be Root Entry.")
+
+    indexes = {name: index for index, (name, _) in enumerate(names)}
+    groups = {index: [] for index, (_, entry_type) in enumerate(names) if entry_type in (1, 5)}
+    for child_name, parent_name in parents.items():
+        child_id = indexes[child_name]
+        parent_id = indexes[parent_name]
+        if parent_id not in groups:
+            raise ValueError("Parent entry must be a storage.")
+        groups[parent_id].append(child_id)
+
+    directory_offset = 512 if major == 3 else 4096
+    for parent_id, child_ids in groups.items():
+        child_ids.sort(key=lambda index: (
+            len(names[index][0].encode("utf-16le")) + 2,
+            tuple(
+                ord(char.upper()) if len(char.upper()) == 1 else ord(char)
+                for char in names[index][0]
+            ),
+        ))
+
+        def build_tree(items):
+            if not items:
+                return FREE
+            middle = len(items) // 2
+            node = items[middle]
+            left_id = build_tree(items[:middle])
+            right_id = build_tree(items[middle + 1:])
+            offset = directory_offset + node * 128
+            struct.pack_into("<II", data, offset + 68, left_id, right_id)
+            data[offset + 67] = 1
+            return node
+
+        child_root = build_tree(child_ids)
+        struct.pack_into("<I", data, directory_offset + parent_id * 128 + 76, child_root)
+
+    return bytes(data)
+
+
+def make_vba_record(record_id, payload):
+    return struct.pack("<HI", record_id, len(payload)) + payload
+
+
+def make_vba_module_block(stream_name="Module1", module_name="Module1", source_offset=0):
+    stream_bytes = stream_name.encode("cp1252")
+    name_bytes = module_name.encode("cp1252")
+    unicode_bytes = stream_name.encode("utf-16le")
+    module = b"".join([
+        make_vba_record(0x0019, name_bytes),
+        make_vba_record(0x001A, stream_bytes),
+        make_vba_record(0x0032, unicode_bytes),
+        make_vba_record(0x0031, struct.pack("<I", source_offset)),
+        make_vba_record(0x001E, struct.pack("<I", 0)),
+        make_vba_record(0x002C, struct.pack("<H", 1)),
+        make_vba_record(0x0021, b""),
+        make_vba_record(0x002B, b""),
+        b"\x00\x00\x00\x00",
+    ])
+    return b"".join([
+        make_vba_record(0x000F, struct.pack("<H", 1)),
+        make_vba_record(0x0013, struct.pack("<H", 1)),
+        module,
+        make_vba_record(0x0010, b""),
+        b"\x00\x00\x00\x00",
+    ])
+
+
+def make_vba_raw_container(data):
+    if len(data) > 4096:
+        raise ValueError("VBA raw test chunk is too large")
+    chunk = data.ljust(4096, b"\x00")
+    return b"\x01" + struct.pack("<H", 0x3FFF) + chunk
+
+
+def make_vba_compressed_container(data):
+    if len(data) > 4096:
+        raise ValueError("VBA test data is too large")
+    encoded = bytearray()
+    for offset in range(0, len(data), 8):
+        encoded.append(0)
+        encoded.extend(data[offset:offset + 8])
+    chunk_size = len(encoded) + 2
+    if chunk_size < 3 or chunk_size > 4098:
+        raise ValueError("VBA compressed test chunk size is invalid")
+    header = 0xB000 | (chunk_size - 3)
+    return b"\x01" + struct.pack("<H", header) + bytes(encoded)
+
+
+def build_cfb_with_mini_streams(names, parents, stream_data):
+    data = bytearray(build_cfb_with_hierarchy(names, parents))
+    sector_size = 512
+    directory_sector_count = max(1, (len(names) * 128 + sector_size - 1) // sector_size)
+    directory_end = sector_size + directory_sector_count * sector_size
+    data = data[:directory_end]
+    mini_stream = bytearray()
+    mini_fat = [EOC] * (sector_size // 4)
+    stream_starts = {}
+    for name, payload in stream_data.items():
+        if not payload:
+            stream_starts[name] = EOC
+            continue
+        first = len(mini_stream) // 64
+        chunks = [payload[offset:offset + 64] for offset in range(0, len(payload), 64)]
+        for index, chunk in enumerate(chunks):
+            mini_stream.extend(chunk.ljust(64, b"\x00"))
+            mini_id = first + index
+            mini_fat[mini_id] = mini_id + 1 if index + 1 < len(chunks) else EOC
+        stream_starts[name] = first
+    root_mini_size = len(mini_stream)
+    mini_stream = mini_stream.ljust(sector_size, b"\x00")
+    mini_fat_sector_id = directory_sector_count
+    root_mini_sector_id = directory_sector_count + 1
+    fat_sector_id = directory_sector_count + 2
+    mini_fat_bytes = struct.pack(f"<{sector_size // 4}I", *mini_fat)
+    fat_words = [FREE] * (sector_size // 4)
+    for sector_id in range(directory_sector_count):
+        fat_words[sector_id] = sector_id + 1 if sector_id + 1 < directory_sector_count else EOC
+    fat_words[mini_fat_sector_id] = EOC
+    fat_words[root_mini_sector_id] = EOC
+    fat_words[fat_sector_id] = FATSECT
+    data.extend(mini_fat_bytes)
+    data.extend(mini_stream)
+    data.extend(struct.pack(f"<{sector_size // 4}I", *fat_words))
+    struct.pack_into("<I", data, 44, 1)
+    struct.pack_into("<I", data, 60, mini_fat_sector_id)
+    struct.pack_into("<I", data, 64, 1)
+    struct.pack_into("<I", data, 68, EOC)
+    struct.pack_into("<I", data, 72, 0)
+    difat = [fat_sector_id] + [FREE] * 108
+    struct.pack_into("<109I", data, 76, *difat)
+    for index, (name, entry_type) in enumerate(names):
+        offset = sector_size + index * 128
+        if entry_type == 5:
+            struct.pack_into("<I", data, offset + 116, root_mini_sector_id)
+            struct.pack_into("<Q", data, offset + 120, root_mini_size)
+        elif entry_type == 2:
+            payload = stream_data.get(name, b"")
+            struct.pack_into("<I", data, offset + 116, stream_starts.get(name, EOC))
+            struct.pack_into("<Q", data, offset + 120, len(payload))
+    return bytes(data)
+
+
+class VbaDirParsingTests(unittest.TestCase):
+    def test_decompresses_raw_vba_chunk(self):
+        payload = b"VBA dir test"
+        result = _decompress_vba_container(make_vba_raw_container(payload))
+        self.assertEqual(result[:len(payload)], payload)
+        self.assertEqual(len(result), 4096)
+
+    def test_decompresses_literal_compressed_chunk(self):
+        payload = b"VBA-DIR!"
+        header = struct.pack("<H", 0xB008)
+        result = _decompress_vba_container(b"\x01" + header + b"\x00" + payload)
+        self.assertEqual(result, payload)
+
+    def test_decompresses_overlapping_copy_token(self):
+        payload = b"\x10ABCD" + struct.pack("<H", 0x3000)
+        result = _decompress_vba_container(b"\x01" + struct.pack("<H", 0xB006) + payload)
+        self.assertEqual(result, b"ABCDABC")
+
+    def test_rejects_copy_token_before_chunk_output(self):
+        payload = b"\x01" + struct.pack("<H", 0x0000)
+        with self.assertRaises(ValueError):
+            _decompress_vba_container(b"\x01" + struct.pack("<H", 0xB002) + payload)
+
+    def test_enforces_decompressed_output_limit(self):
+        chunk = b"\x01" + struct.pack("<H", 0x3FFF) + b"A" * 4096
+        with self.assertRaises(ValueError):
+            _decompress_vba_container(chunk + chunk, max_output=4096)
+
+    def test_rejects_invalid_compressed_container_signature(self):
+        with self.assertRaises(ValueError):
+            _decompress_vba_container(b"\x00\x00\x00")
+
+    def test_rejects_truncated_compressed_chunk(self):
+        with self.assertRaises(ValueError):
+            _decompress_vba_container(b"\x01\xFF\x3Fshort")
+
+    def test_parses_module_name_stream_name_offset_and_type(self):
+        modules = _parse_vba_module_block(make_vba_module_block("ThisWorkbook", "Workbook", 17))
+        self.assertEqual(modules, [{
+            "name": "Workbook",
+            "stream_name": "ThisWorkbook",
+            "source_offset": 17,
+            "module_type": "procedural",
+        }])
+
+    def test_rejects_missing_module_terminator(self):
+        data = make_vba_module_block()
+        data = data.replace(make_vba_record(0x002B, b"") + b"\x00\x00\x00\x00", b"", 1)
+        with self.assertRaises(ValueError):
+            _parse_vba_module_block(data)
+
+    def test_rejects_duplicate_module_stream_names(self):
+        module = make_vba_module_block()
+        module_block = module[module.find(b"\x0f\x00\x02\x00\x00\x00"):]
+        count_record = make_vba_record(0x000F, struct.pack("<H", 2))
+        cookie = make_vba_record(0x0013, struct.pack("<H", 1))
+        one_module_start = module.find(make_vba_record(0x0019, b"Module1"))
+        one_module_end = module.find(make_vba_record(0x0010, b""))
+        one_module = module[one_module_start:one_module_end]
+        data = count_record + cookie + one_module + one_module + make_vba_record(0x0010, b"") + b"\x00\x00\x00\x00"
+        with self.assertRaises(ValueError):
+            _parse_vba_module_block(data)
+
+
 class LegacyOfficeTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -216,26 +430,208 @@ class LegacyOfficeTests(unittest.TestCase):
         path.write_bytes(data)
         return analyze_legacy_office(str(path))
 
-    def test_detects_legacy_word_and_vba_directory_indicators(self):
-        data = build_cfb_with_root_tree([
+    def test_detects_legacy_word_and_nested_vba_storage(self):
+        names = [
             ("Root Entry", 5), ("WordDocument", 2), ("0Table", 2),
-            ("VBA", 1), ("dir", 2), ("_VBA_PROJECT", 2), ("PROJECT", 2),
-            ("PROJECTwm", 2), ("PROJECTlk", 2),
-        ])
+            ("vBa", 1), ("dIr", 2), ("_VBA_PROJECT", 2), ("Module1", 2),
+            ("PROJECT", 2), ("PROJECTwm", 2), ("PROJECTlk", 2),
+        ]
+        data = build_cfb_with_hierarchy(
+            names,
+            {
+                "WordDocument": "Root Entry", "0Table": "Root Entry",
+                "vBa": "Root Entry", "dIr": "vBa",
+                "_VBA_PROJECT": "vBa", "Module1": "vBa",
+                "PROJECT": "Root Entry", "PROJECTwm": "Root Entry",
+                "PROJECTlk": "Root Entry",
+            },
+        )
         report = self.analyze("sample.doc", data)
+        analysis = report["legacy_office_analysis"]
         self.assertEqual(report["file"]["file_type"], "doc")
-        self.assertEqual(report["legacy_office_analysis"]["family"], "word")
-        self.assertEqual(report["legacy_office_analysis"]["status"], "parsed")
-        self.assertIs(report["legacy_office_analysis"]["root_directory_entry_valid"], True)
-        self.assertTrue(report["legacy_office_analysis"]["vba_project_present"])
-        features = report["legacy_office_analysis"]["features"]
+        self.assertEqual(analysis["family"], "word")
+        self.assertEqual(analysis["status"], "parsed")
+        self.assertIs(analysis["root_directory_entry_valid"], True)
+        self.assertTrue(analysis["vba_project_present"])
+        self.assertEqual(analysis["vba_project_structure_status"], "required_entries_present")
+        features = analysis["features"]
         self.assertTrue(features["vba_storage_name_present"])
+        self.assertTrue(features["vba_storage_at_root_present"])
+        self.assertTrue(features["vba_required_streams_present"])
+        self.assertTrue(features["vba_root_project_stream_present"])
         self.assertTrue(features["vba_project_stream_name_present"])
         self.assertTrue(features["vba_directory_stream_name_present"])
         self.assertTrue(features["vba_project_metadata_stream_name_present"])
         self.assertTrue(features["vba_project_workspace_stream_name_present"])
         self.assertTrue(features["vba_project_link_stream_name_present"])
         self.assertEqual(report["assessment"]["verdict"], "not_assessed")
+
+    def test_vba_name_indicators_outside_storage_do_not_confirm_project(self):
+        data = build_cfb_with_root_tree([
+            ("Root Entry", 5), ("WordDocument", 2), ("VBA", 1),
+            ("dir", 2), ("_VBA_PROJECT", 2),
+        ])
+        report = self.analyze("decoy-vba-names.doc", data)
+        analysis = report["legacy_office_analysis"]
+        self.assertFalse(analysis["vba_project_present"])
+        self.assertEqual(analysis["vba_project_structure_status"], "incomplete")
+        self.assertTrue(analysis["features"]["vba_project_stream_name_present"])
+        self.assertTrue(analysis["features"]["vba_directory_stream_name_present"])
+        self.assertFalse(analysis["features"]["vba_required_streams_present"])
+        self.assertEqual(report["assessment"]["verdict"], "not_assessed")
+
+    def test_vba_required_streams_must_both_be_children_of_vba_storage(self):
+        names = [
+            ("Root Entry", 5), ("WordDocument", 2), ("VBA", 1),
+            ("dir", 2), ("_VBA_PROJECT", 2),
+        ]
+        data = build_cfb_with_hierarchy(
+            names,
+            {"WordDocument": "Root Entry", "VBA": "Root Entry",
+             "dir": "VBA", "_VBA_PROJECT": "Root Entry"},
+        )
+        report = self.analyze("split-vba-streams.doc", data)
+        analysis = report["legacy_office_analysis"]
+        self.assertFalse(analysis["vba_project_present"])
+        self.assertEqual(analysis["vba_project_structure_status"], "incomplete")
+        self.assertFalse(analysis["features"]["vba_required_streams_present"])
+
+    def test_vba_project_requires_project_stream_at_root(self):
+        names = [
+            ("Root Entry", 5), ("WordDocument", 2), ("VBA", 1),
+            ("dir", 2), ("_VBA_PROJECT", 2),
+        ]
+        data = build_cfb_with_hierarchy(
+            names,
+            {"WordDocument": "Root Entry", "VBA": "Root Entry",
+             "dir": "VBA", "_VBA_PROJECT": "VBA"},
+        )
+        report = self.analyze("missing-root-project-stream.doc", data)
+        analysis = report["legacy_office_analysis"]
+        self.assertFalse(analysis["vba_project_present"])
+        self.assertEqual(analysis["vba_project_structure_status"], "incomplete")
+        self.assertFalse(analysis["features"]["vba_root_project_stream_present"])
+
+    def test_vba_structure_is_indeterminate_when_directory_tree_is_invalid(self):
+        data = bytearray(build_cfb_with_root_tree([
+            ("Root Entry", 5), ("WordDocument", 2), ("VBA", 1),
+            ("dir", 2), ("_VBA_PROJECT", 2),
+        ]))
+        struct.pack_into("<I", data, 512 + 76, 999)
+        report = self.analyze("invalid-vba-tree.doc", bytes(data))
+        analysis = report["legacy_office_analysis"]
+        self.assertFalse(analysis["vba_project_present"])
+        self.assertEqual(analysis["vba_project_structure_status"], "indeterminate")
+
+    def test_parses_vba_dir_and_confirms_module_stream_mapping(self):
+        names = [
+            ("Root Entry", 5), ("WordDocument", 2), ("VBA", 1),
+            ("_VBA_PROJECT", 2), ("dir", 2), ("ThisWorkbook", 2),
+            ("PROJECT", 2),
+        ]
+        dir_payload = make_vba_module_block("ThisWorkbook", "Workbook", 0)
+        stream_data = {
+            "_VBA_PROJECT": b"\x00",
+            "dir": make_vba_compressed_container(dir_payload),
+            "ThisWorkbook": b"\x01\x02\x03",
+            "PROJECT": b"Project=Sample",
+        }
+        data = build_cfb_with_mini_streams(
+            names,
+            {
+                "WordDocument": "Root Entry", "VBA": "Root Entry",
+                "_VBA_PROJECT": "VBA", "dir": "VBA",
+                "ThisWorkbook": "VBA", "PROJECT": "Root Entry",
+            },
+            stream_data,
+        )
+        report = self.analyze("vba-modules.doc", data)
+        analysis = report["legacy_office_analysis"]
+        self.assertEqual(analysis["vba_dir_stream_status"], "parsed")
+        self.assertEqual(analysis["vba_project_validation_status"], "module_streams_confirmed")
+        self.assertEqual(analysis["vba_module_count"], 1)
+        self.assertTrue(analysis["features"]["vba_module_streams_present"])
+        self.assertTrue(analysis["features"]["vba_module_streams_complete"])
+        self.assertEqual(analysis["vba_modules"][0]["name"], "Workbook")
+        self.assertEqual(analysis["vba_modules"][0]["stream_name"], "ThisWorkbook")
+        self.assertEqual(report["assessment"]["verdict"], "not_assessed")
+
+    def test_invalid_vba_dir_stream_is_reported_without_confirming_project(self):
+        names = [
+            ("Root Entry", 5), ("WordDocument", 2), ("VBA", 1),
+            ("_VBA_PROJECT", 2), ("dir", 2), ("PROJECT", 2),
+        ]
+        data = build_cfb_with_mini_streams(
+            names,
+            {
+                "WordDocument": "Root Entry", "VBA": "Root Entry",
+                "_VBA_PROJECT": "VBA", "dir": "VBA", "PROJECT": "Root Entry",
+            },
+            {"_VBA_PROJECT": b"\x00", "dir": b"\x00invalid", "PROJECT": b"Project=Sample"},
+        )
+        report = self.analyze("vba-invalid-dir.doc", data)
+        analysis = report["legacy_office_analysis"]
+        self.assertEqual(analysis["vba_dir_stream_status"], "invalid")
+        self.assertEqual(analysis["vba_project_validation_status"], "invalid_dir_stream")
+        self.assertFalse(analysis["features"]["vba_project_metadata_validated"])
+
+    def test_vba_module_stream_name_matching_is_case_insensitive(self):
+        names = [
+            ("Root Entry", 5), ("WordDocument", 2), ("VBA", 1),
+            ("_VBA_PROJECT", 2), ("dir", 2), ("thisworkbook", 2),
+            ("PROJECT", 2),
+        ]
+        data = build_cfb_with_mini_streams(
+            names,
+            {
+                "WordDocument": "Root Entry", "VBA": "Root Entry",
+                "_VBA_PROJECT": "VBA", "dir": "VBA",
+                "thisworkbook": "VBA", "PROJECT": "Root Entry",
+            },
+            {
+                "_VBA_PROJECT": b"\x00",
+                "dir": make_vba_compressed_container(make_vba_module_block("ThisWorkbook", "Workbook", 0)),
+                "thisworkbook": b"\x01\x02\x03",
+                "PROJECT": b"Project=Sample",
+            },
+        )
+        report = self.analyze("vba-case-insensitive.doc", data)
+        features = report["legacy_office_analysis"]["features"]
+        self.assertTrue(features["vba_module_streams_present"])
+        self.assertTrue(features["vba_module_streams_complete"])
+        self.assertEqual(
+            report["legacy_office_analysis"]["vba_project_validation_status"],
+            "module_streams_confirmed",
+        )
+
+    def test_vba_module_stream_presence_is_separate_from_source_validation(self):
+        names = [
+            ("Root Entry", 5), ("WordDocument", 2), ("VBA", 1),
+            ("_VBA_PROJECT", 2), ("dir", 2), ("ThisWorkbook", 2),
+            ("PROJECT", 2),
+        ]
+        data = build_cfb_with_mini_streams(
+            names,
+            {
+                "WordDocument": "Root Entry", "VBA": "Root Entry",
+                "_VBA_PROJECT": "VBA", "dir": "VBA",
+                "ThisWorkbook": "VBA", "PROJECT": "Root Entry",
+            },
+            {
+                "_VBA_PROJECT": b"\x00",
+                "dir": make_vba_compressed_container(make_vba_module_block("ThisWorkbook", "Workbook", 99)),
+                "ThisWorkbook": b"\x01\x02\x03",
+                "PROJECT": b"Project=Sample",
+            },
+        )
+        report = self.analyze("vba-invalid-source-offset.doc", data)
+        features = report["legacy_office_analysis"]["features"]
+        self.assertTrue(features["vba_module_streams_present"])
+        self.assertFalse(features["vba_module_streams_complete"])
+        self.assertEqual(
+            report["legacy_office_analysis"]["vba_project_validation_status"],
+            "module_streams_unverified",
+        )
 
     def test_detects_excel_and_powerpoint_stream_families(self):
         excel = self.analyze("sample.xls", build_cfb([("Root Entry", 5), ("Workbook", 2)]))
