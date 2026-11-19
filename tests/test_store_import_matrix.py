@@ -174,6 +174,27 @@ def test_epss_import_skips_bad_ids_numbers_and_out_of_range_values(tmp_path: Pat
     assert [tuple(row) for row in rows] == [("CVE-2024-1003", 0.2, 0.8)]
 
 
+
+def test_epss_import_preserves_official_model_and_score_date_metadata(tmp_path: Path) -> None:
+    db_path = init_db(tmp_path / "epss-metadata.sqlite3")
+    path = tmp_path / "scores.csv"
+    path.write_text(
+        "#model_version:v2026.06.15,score_date:2026-11-19T00:00:00Z\n"
+        "cve,epss,percentile\n"
+        "CVE-2024-1003,0.2,0.8\n",
+        encoding="utf-8",
+    )
+
+    assert import_epss_csv(path, db_path) == 1
+
+    with connect(db_path) as conn:
+        source = conn.execute(
+            "SELECT status,details FROM source_sync WHERE source='FIRST EPSS'"
+        ).fetchone()
+    assert source["status"] == "success"
+    assert "model_version=v2026.06.15" in source["details"]
+    assert "score_date=2026-11-19T00:00:00Z" in source["details"]
+
 def test_reference_sample_import_skips_non_object_samples_and_non_object_links(tmp_path: Path) -> None:
     db_path = init_db(tmp_path / "samples.sqlite3")
     path = _write_json(tmp_path / "samples.json", {"samples": [None, "not-a-row", _sample()]})
