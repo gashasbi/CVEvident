@@ -87,6 +87,7 @@ def analyze_file(path: str | Path, db_path: str | Path | None = None,
                 "SHA-256 and bounded input read", "OOXML content-type-based format identification",
                 "bounded ZIP member inventory", "bounded XML and package relationship inspection",
                 "VBA/ActiveX/embedded-object/external-link structural indicators",
+                "External attached-template relationship and Excel connection/query-part indicators",
                 "Office formula/field/link indicators when present in inspected XML parts",
             ],
             "not_implemented": [
@@ -98,22 +99,22 @@ def analyze_file(path: str | Path, db_path: str | Path | None = None,
         }
     elif report.get("legacy_office_analysis") is not None:
         report["scope"] = {
-            "implemented": ["SHA-256 and bounded input read", "OLE/CFB header and FAT/directory metadata inspection", "legacy Office family indicators from directory stream names", "macro/embedded-object/external-link name indicators"],
+            "implemented": ["SHA-256 and bounded input read", "OLE/CFB header and FAT/directory metadata inspection", "legacy Office family indicators from directory stream names", "VBA project component name indicators", "macro/embedded-object/external-link name indicators"],
             "not_implemented": ["interpreting document stream bodies", "VBA source extraction/decompilation/execution", "full semantic Word/Excel/PowerPoint parsing", "embedded-object extraction", "dynamic analysis", "exploit detection", "definitive CVE attribution"],
         }
     elif report.get("rtf_analysis") is not None:
         report["scope"] = {
-            "implemented": ["SHA-256 and bounded input read", "bounded RTF control-word/group scan", "field instruction and external-target string indicators", "bounded binary payload skipping"],
+            "implemented": ["SHA-256 and bounded input read", "bounded RTF control-word/group scan", "OLE object-type control indicators", "field instruction keyword and external-target string indicators", "bounded binary payload skipping"],
             "not_implemented": ["full RTF semantic rendering", "executing field instructions", "opening external targets", "decoding/interpreting embedded OLE payloads", "dynamic analysis", "exploit detection", "definitive CVE attribution"],
         }
     elif report.get("odf_analysis") is not None:
         report["scope"] = {
-            "implemented": ["SHA-256 and bounded input read", "ODF mimetype-based format identification", "bounded ZIP package inventory", "bounded XML inspection", "script/macro/embedded-object/external-reference indicators"],
+            "implemented": ["SHA-256 and bounded input read", "ODF mimetype-based format identification", "bounded ZIP package inventory", "bounded XML inspection", "script-event, macro-field, external-script, embedded-object, and external-reference indicators"],
             "not_implemented": ["full semantic Writer/Calc/Impress parsing", "macro/script execution", "opening/fetching external targets", "embedded-object extraction", "dynamic analysis", "exploit detection", "definitive CVE attribution"],
         }
     else:
         report["scope"] = {
-            "implemented": ["sha256", "PDF header check", "byte entropy", "local entropy", "PDF-name lexical counts", "bounded pypdf object-graph inspection", "PDF action/annotation/form/embedded-file structural indicators"],
+            "implemented": ["sha256", "PDF header check", "byte entropy", "local entropy", "PDF-name lexical counts", "bounded pypdf object-graph inspection", "PDF action/annotation/form/associated-file/embedded-file structural indicators"],
             "not_implemented": ["complete semantic PDF validation", "arbitrary stream-content extraction", "dynamic analysis", "exploit detection", "definitive CVE attribution"],
         }
     report["reference_sample_matches"] = lookup_reference_samples(report["file"]["sha256"], db_path)

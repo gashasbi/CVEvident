@@ -103,7 +103,16 @@ def _base_report(file_input: Any, status: str, message: str, file_type: str = "u
                          "mimetype": None, "main_part": "content.xml", "mimetype_first_and_uncompressed": None,
                          "container_entry_count": 0, "declared_uncompressed_bytes": 0,
                          "xml_parts_inspected": 0, "xml_bytes_inspected": 0, "truncated": False,
-                         "features": {}, "external_references": [], "parts_inventory": [], "warnings": [message]},
+                         "features": {}, "script_event_listeners": [], "script_event_listeners_truncated": False,
+                         "manifest_validation": {
+                             "parsed": False, "declared_file_entry_count": 0,
+                             "duplicate_path_count": 0,
+                             "package_files_missing_from_manifest": [],
+                             "manifest_paths_missing_from_package": [],
+                             "unlisted_package_file_count": 0,
+                             "missing_package_file_count": 0,
+                         },
+                         "external_references": [], "parts_inventory": [], "warnings": [message]},
         "evidence": [
             {"evidence_type": "file_identity", "key": "sha256", "value": file_input.sha256,
              "severity": "info", "details": {"algorithm": "SHA-256", "meaning": "exact file fingerprint"}},
@@ -233,6 +242,12 @@ def analyze_opendocument(path: str, max_bytes: int = 100 * 1024 * 1024,
         inspected: list[str] = []
         feature_counts: Counter[str] = Counter()
         external_refs: list[dict[str, str]] = []
+        external_reference_schemes: Counter[str] = Counter()
+        script_language_counts: Counter[str] = Counter()
+        script_event_listeners: list[dict[str, str]] = []
+        script_event_listeners_truncated = False
+        manifest_path_counts: Counter[str] = Counter()
+        manifest_parsed = False
         macro_members = [n for n in by_name if n.casefold().startswith(("basic/", "scripts/"))]
         embedded_members = [n for n in by_name if n.casefold().startswith(("objects/", "objectreplacements/"))]
         if macro_members:
@@ -282,16 +297,43 @@ def analyze_opendocument(path: str, max_bytes: int = 100 * 1024 * 1024,
                 partial = True
                 continue
             inspected.append(name)
+            if name == "META-INF/manifest.xml":
+                manifest_parsed = True
             for node in root.iter():
                 local = _local_name(node.tag).casefold()
+                if name == "META-INF/manifest.xml" and local == "file-entry":
+                    for attr_name, attr_value in node.attrib.items():
+                        if _local_name(attr_name).casefold() == "full-path":
+                            manifest_path = str(attr_value).strip()
+                            if manifest_path and manifest_path != "/":
+                                manifest_path_counts[manifest_path] += 1
+                            break
                 if local in {"event-listener", "eventlistener"}:
                     feature_counts["script_event_listener_count"] += 1
+                    if len(script_event_listeners) < MAX_EXTERNAL_EXAMPLES:
+                        listener_attributes = {
+                            _local_name(attr_name).casefold(): attr_value
+                            for attr_name, attr_value in node.attrib.items()
+                        }
+                        listener = {
+                            "part": _safe_text(name, 240),
+                            "event_name": _safe_text(listener_attributes.get("event-name", ""), 160),
+                            "macro_name": _safe_text(listener_attributes.get("macro-name", ""), 160),
+                            "language": _safe_text(listener_attributes.get("language", ""), 100),
+                            "href": _safe_text(listener_attributes.get("href", ""), 500),
+                        }
+                        if any(listener[key] for key in ("event_name", "macro_name", "language", "href")):
+                            script_event_listeners.append(listener)
+                    else:
+                        script_event_listeners_truncated = True
                 elif local in {"script", "scripts"}:
                     feature_counts["script_element_count"] += 1
                 elif local in {"object", "object-ole"}:
                     feature_counts["embedded_object_element_count"] += 1
-                elif local in {"dde-link", "dde-link-ref"}:
+                elif local in {"dde-link", "dde-link-ref", "dde-source"}:
                     feature_counts["dde_element_count"] += 1
+                elif local == "execute-macro":
+                    feature_counts["macro_execution_field_count"] += 1
                 elif local in {"database-range", "database-source-sql"}:
                     feature_counts["database_related_element_count"] += 1
                 elif local == "encryption-data":
@@ -300,15 +342,35 @@ def analyze_opendocument(path: str, max_bytes: int = 100 * 1024 * 1024,
                 for attr_name, attr_value in node.attrib.items():
                     attr_local = _local_name(attr_name).casefold()
                     attr_val = _safe_text(attr_value, 2048)
+                    if attr_local == "language" and local in {"script", "event-listener", "eventlistener"} and attr_val:
+                        language_key = attr_val.casefold()
+                        script_language_counts[language_key] += 1
                     if attr_local == "href" and attr_val and _is_external_target(attr_val):
                         feature_counts["external_reference_count"] += 1
+                        if local in {"script", "event-listener", "eventlistener"}:
+                            feature_counts["external_script_reference_count"] += 1
+                        try:
+                            parsed_target = urlsplit(attr_val)
+                            scheme = parsed_target.scheme.casefold() or "network_path"
+                        except ValueError:
+                            scheme = "invalid_uri"
+                        external_reference_schemes[scheme] += 1
                         if len(external_refs) < MAX_EXTERNAL_EXAMPLES:
-                            external_refs.append({"part": name, "element": _safe_text(local, 100), "target": attr_val})
+                            external_refs.append({
+                                "part": name,
+                                "element": _safe_text(local, 100),
+                                "target": attr_val,
+                                "scheme": scheme,
+                            })
                     if attr_local == "formula" and attr_val:
                         feature_counts["formula_attribute_count"] += 1
                         if _EXTERNAL_FORMULA.search(_strip_formula_string_literals(attr_val)):
                             feature_counts["external_or_network_formula_count"] += 1
 
+        if script_event_listeners_truncated:
+            warnings.append(
+                f"ODF script event-listener examples were capped at {MAX_EXTERNAL_EXAMPLES}; the total listener count remains available."
+            )
         if feature_counts.get("encrypted_member_manifest_entry_count", 0):
             warnings.append("Manifest declares encrypted OpenDocument member(s); content was not decrypted or interpreted.")
             partial = True
@@ -319,6 +381,43 @@ def analyze_opendocument(path: str, max_bytes: int = 100 * 1024 * 1024,
         if manifest_info is None:
             warnings.append("META-INF/manifest.xml is missing; package inventory may be incomplete.")
             partial = True
+
+        manifest_validation: dict[str, Any] = {
+            "parsed": manifest_parsed,
+            "declared_file_entry_count": sum(manifest_path_counts.values()),
+            "duplicate_path_count": sum(count - 1 for count in manifest_path_counts.values() if count > 1),
+            "package_files_missing_from_manifest": [],
+            "manifest_paths_missing_from_package": [],
+            "unlisted_package_file_count": 0,
+            "missing_package_file_count": 0,
+        }
+        if manifest_parsed:
+            manifest_paths = {
+                path for path in manifest_path_counts
+                if not path.startswith("META-INF/") and path != "mimetype" and not path.endswith("/")
+            }
+            package_paths = {
+                info.filename for info in all_infos
+                if not info.is_dir()
+                and info.filename not in unsafe_names
+                and info.filename not in duplicate_names
+                and info.filename != "mimetype"
+                and not info.filename.startswith("META-INF/")
+            }
+            unlisted_paths = sorted(package_paths - manifest_paths)
+            missing_paths = sorted(manifest_paths - package_paths)
+            manifest_validation.update({
+                "package_files_missing_from_manifest": [_safe_text(name, 240) for name in unlisted_paths[:MAX_PART_EXAMPLES]],
+                "manifest_paths_missing_from_package": [_safe_text(name, 240) for name in missing_paths[:MAX_PART_EXAMPLES]],
+                "unlisted_package_file_count": len(unlisted_paths),
+                "missing_package_file_count": len(missing_paths),
+            })
+            if manifest_validation["duplicate_path_count"]:
+                warnings.append("ODF manifest contains duplicate file-entry paths; package metadata is ambiguous.")
+            if unlisted_paths:
+                warnings.append("Some package files are not listed in META-INF/manifest.xml.")
+            if missing_paths:
+                warnings.append("Some manifest file-entry paths do not identify a package member.")
 
         # Count all ZIP members with script/macro-like names, including paths beyond the
         # XML inspection selection. Their presence is a static indicator only.
@@ -353,7 +452,12 @@ def analyze_opendocument(path: str, max_bytes: int = 100 * 1024 * 1024,
                 "container_entry_count": entry_count, "declared_uncompressed_bytes": declared_bytes,
                 "xml_parts_inspected": len(inspected), "xml_bytes_inspected": xml_bytes_total,
                 "truncated": bool(partial), "features": dict(feature_counts),
+                "script_language_counts": dict(script_language_counts),
+                "script_event_listeners": script_event_listeners,
+                "script_event_listeners_truncated": script_event_listeners_truncated,
+                "external_reference_schemes": dict(external_reference_schemes),
                 "external_references": external_refs, "parts_inventory": inspected[:MAX_PART_EXAMPLES],
+                "manifest_validation": manifest_validation,
                 "macro_or_script_members": [_safe_text(n, 240) for n in macro_members[:MAX_PART_EXAMPLES]],
                 "embedded_object_members": [_safe_text(n, 240) for n in embedded_members[:MAX_PART_EXAMPLES]],
                 "warnings": list(dict.fromkeys(warnings)),
@@ -370,11 +474,45 @@ def analyze_opendocument(path: str, max_bytes: int = 100 * 1024 * 1024,
                 "Scripts, macros, hyperlinks, external references and embedded objects are never executed, opened, extracted or fetched.", *warnings,
             ])),
         }
+        if manifest_parsed:
+            report["evidence"].append({
+                "evidence_type": "odf_package_integrity",
+                "key": "odf.manifest_validation",
+                "value": manifest_validation,
+                "severity": "warning" if any((
+                    manifest_validation["duplicate_path_count"],
+                    manifest_validation["unlisted_package_file_count"],
+                    manifest_validation["missing_package_file_count"],
+                )) else "info",
+                "details": {
+                    "context_only": True,
+                    "interpretation": "Manifest paths were compared with package member names only; this is a package-consistency observation, not a malware finding.",
+                },
+            })
         for key, value in feature_counts.items():
             if value:
                 report["evidence"].append({"evidence_type": "odf_indicator", "key": f"odf.{key}", "value": value,
                     "severity": "info", "details": {"context_only": True,
                     "interpretation": "Static OpenDocument package/XML indicator; not proof of maliciousness."}})
+        if script_event_listeners:
+            report["evidence"].append({
+                "evidence_type": "odf_script_metadata",
+                "key": "odf.script_event_listeners",
+                "value": script_event_listeners,
+                "severity": "info",
+                "details": {
+                    "context_only": True,
+                    "interpretation": "Event-to-macro binding attributes were recorded from XML; referenced macro code was not resolved or executed.",
+                },
+            })
+        if script_language_counts:
+            report["evidence"].append({
+                "evidence_type": "odf_script_metadata",
+                "key": "odf.script_language_counts",
+                "value": dict(script_language_counts),
+                "severity": "info",
+                "details": {"context_only": True, "interpretation": "Declared script-language metadata; script source was not interpreted or executed."},
+            })
         if external_refs:
             report["evidence"].append({"evidence_type": "odf_external_reference", "key": "odf.external_references",
                 "value": len(external_refs), "severity": "info",

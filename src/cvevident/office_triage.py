@@ -69,6 +69,19 @@ OLE_OBJECT_RELATIONSHIP_TYPES = frozenset({
     "http://purl.oclc.org/ooxml/officeDocument/relationships/oleObject",
 })
 MAX_PART_EXAMPLES = 80
+CUSTOM_UI_NAMESPACES = frozenset({
+    "http://schemas.microsoft.com/office/2006/01/customui",
+    "http://schemas.microsoft.com/office/2009/07/customui",
+})
+CUSTOM_UI_CALLBACK_ATTRIBUTES = frozenset({
+    "onaction", "onload", "loadimage", "getenabled", "getvisible", "getlabel",
+    "getimage", "getpressed", "getcontent", "gettext", "getdescription",
+    "getkeytip", "getscreentip", "getsupertip", "getsize", "getshowimage",
+    "getshowlabel", "getitemcount", "getitemlabel", "getitemid",
+    "getitemscreentip", "getitemsupertip", "getselecteditemid",
+    "getselecteditemindex", "getselecteditemlabel", "getselecteditemscreentip",
+    "getselecteditemsupertip",
+})
 
 _EXTERNAL_CONTENT_FUNCTIONS = re.compile(r"\b(?:WEBSERVICE|RTD|DDE|HYPERLINK|FILTERXML)\s*\(", re.I)
 _EXTERNAL_WORKBOOK_REFERENCE = re.compile(
@@ -345,6 +358,19 @@ def _base_report(file_input: Any, status: str, warning: str) -> dict[str, Any]:
             "xml_parts_inspected": 0,
             "truncated": False,
             "features": {},
+            "content_type_validation": {
+                "package_part_count": 0,
+                "default_mapping_count": 0,
+                "override_mapping_count": 0,
+                "duplicate_default_extension_count": 0,
+                "duplicate_override_part_count": 0,
+                "parts_without_declared_content_type": [],
+                "parts_without_declared_content_type_count": 0,
+                "overrides_without_package_part": [],
+                "overrides_without_package_part_count": 0,
+            },
+            "custom_ui_callbacks": [],
+            "custom_ui_callbacks_truncated": False,
             "external_relationships": [],
             "parts_inventory": [],
             "warnings": [warning],
@@ -570,15 +596,29 @@ def analyze_office(
             return report
 
         content_types: dict[str, str] = {}
+        default_content_types: dict[str, str] = {}
+        override_path_counts: Counter[str] = Counter()
+        default_extension_counts: Counter[str] = Counter()
         selected_main: tuple[str, str, bool, str] | None = None
         try:
             manifest_root = parse_xml_member(content_types_info, "[Content_Types].xml")
             for node in manifest_root.iter():
-                if _local_name(node.tag) == "Override":
+                local_name = _local_name(node.tag)
+                if local_name == "Override":
                     part_name = _safe_text(node.attrib.get("PartName", ""), 500).lstrip("/")
                     content_type = _safe_text(node.attrib.get("ContentType", ""), 300).lower()
                     if part_name and content_type:
-                        content_types[part_name] = content_type
+                        override_key = part_name.translate(str.maketrans(
+                            "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"
+                        ))
+                        override_path_counts[override_key] += 1
+                        content_types[override_key] = content_type
+                elif local_name == "Default":
+                    extension = _safe_text(node.attrib.get("Extension", ""), 100).lstrip(".").casefold()
+                    content_type = _safe_text(node.attrib.get("ContentType", ""), 300).lower()
+                    if extension and content_type:
+                        default_extension_counts[extension] += 1
+                        default_content_types[extension] = content_type
             del manifest_root
         except _OfficeXmlInspectionLimit as exc:
             return budget_limited_report(exc)
@@ -630,7 +670,10 @@ def analyze_office(
                     warnings.append("Root officeDocument relationship has an unsafe or unsupported target path.")
                     partial = True
                     continue
-                mapped = MAIN_CONTENT_TYPES.get(content_types.get(target, ""))
+                target_key = target.translate(str.maketrans(
+                    "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"
+                ))
+                mapped = MAIN_CONTENT_TYPES.get(content_types.get(target_key, ""))
                 if mapped is None:
                     warnings.append("Root officeDocument relationship target has no supported Office main-part content type.")
                     partial = True
@@ -667,6 +710,39 @@ def analyze_office(
         if len(set(recognized_main_parts)) > 1:
             warnings.append("Root relationships declare multiple conflicting Office main parts; only the first was used.")
             partial = True
+        package_part_names = {
+            name for name in package_member_names
+            if name != "[Content_Types].xml"
+        }
+        lower_package_part_names = {
+            name.translate(str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"))
+            for name in package_part_names
+        }
+        missing_content_type_parts = sorted(
+            name for name in package_part_names
+            if name.translate(str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"))
+            not in content_types
+            and (
+                "rels" if name.casefold().endswith(".rels")
+                else PurePosixPath(name).suffix.lstrip(".").casefold()
+            ) not in default_content_types
+        )
+        dangling_content_type_overrides = sorted(
+            part_name for part_name in content_types
+            if part_name not in lower_package_part_names
+        )
+        content_type_validation = {
+            "package_part_count": len(package_part_names),
+            "default_mapping_count": sum(default_extension_counts.values()),
+            "override_mapping_count": sum(override_path_counts.values()),
+            "duplicate_default_extension_count": sum(count - 1 for count in default_extension_counts.values() if count > 1),
+            "duplicate_override_part_count": sum(count - 1 for count in override_path_counts.values() if count > 1),
+            "parts_without_declared_content_type": [_safe_text(name, 240) for name in missing_content_type_parts[:MAX_PART_EXAMPLES]],
+            "parts_without_declared_content_type_count": len(missing_content_type_parts),
+            "overrides_without_package_part": [_safe_text(name, 240) for name in dangling_content_type_overrides[:MAX_PART_EXAMPLES]],
+            "overrides_without_package_part_count": len(dangling_content_type_overrides),
+        }
+
         format_id, family, macro_enabled_format, main_part = selected_main
         if main_part not in info_by_name:
             warnings.append(f"Declared Office main part {_safe_text(main_part, 180)} is missing from the ZIP member list.")
@@ -697,7 +773,14 @@ def analyze_office(
             "embedded_object_part_count": sum("/embeddings/" in f"/{name.casefold()}" for name in info_by_name),
             "activex_part_count": sum("/activex/" in f"/{name.casefold()}" for name in info_by_name),
             "external_link_part_count": sum("/externallinks/" in f"/{name.casefold()}" for name in info_by_name),
+            "external_connection_part_count": sum(
+                name.casefold().endswith("/connections.xml") for name in info_by_name
+            ),
+            "query_table_part_count": sum(
+                "/querytables/" in f"/{name.casefold()}" for name in info_by_name
+            ),
             "custom_ui_part_count": sum("/customui/" in f"/{name.casefold()}" for name in info_by_name),
+            "custom_ui_callback_count": 0,
             "macro_sheet_part_count": sum("/macrosheets/" in f"/{name.casefold()}" for name in info_by_name),
             "digital_signature_part_count": sum(name.casefold().startswith("_xmlsignatures/") for name in info_by_name),
             "ole_object_element_count": 0,
@@ -708,11 +791,16 @@ def analyze_office(
             "formula_network_function_count": 0,
             "field_instruction_count": 0,
             "external_relationship_count": 0,
+            "external_attached_template_relationship_count": 0,
+            "external_hyperlink_relationship_count": 0,
+            "external_link_relationship_count": 0,
             "encrypted_member_count": len(encrypted_names),
             "unsafe_member_name_count": len(unsafe_names),
             "duplicate_member_name_count": len(duplicate_names),
         }
         relationships: list[dict[str, Any]] = []
+        custom_ui_callbacks: list[dict[str, str]] = []
+        custom_ui_callbacks_truncated = False
         ole_object_candidates: list[dict[str, str]] = []
         ole_relationships: dict[tuple[str, str], list[dict[str, str]]] = {}
         ole_relationship_entries_seen = 0
@@ -747,9 +835,30 @@ def analyze_office(
             is_relationship_part = info.filename.lower().endswith(".rels")
             source_part = _relationship_source(info.filename) if is_relationship_part else ""
             part_marker = f"/{info.filename.casefold()}"
+            root_tag = str(root.tag)
+            root_namespace = root_tag[1:].split("}", 1)[0] if root_tag.startswith("{") else ""
+            is_custom_ui_part = (
+                "/customui/" in part_marker
+                and _local_name(root.tag).casefold() == "customui"
+                and root_namespace in CUSTOM_UI_NAMESPACES
+            )
             features["field_instruction_count"] = int(features["field_instruction_count"]) + _count_split_field_instructions(root)
             for node in root.iter():
                 local = _local_name(node.tag).casefold()
+                if is_custom_ui_part:
+                    for attribute_name, attribute_value in node.attrib.items():
+                        callback_attribute = _local_name(attribute_name).casefold()
+                        if callback_attribute in CUSTOM_UI_CALLBACK_ATTRIBUTES and attribute_value.strip():
+                            features["custom_ui_callback_count"] = int(features["custom_ui_callback_count"]) + 1
+                            if len(custom_ui_callbacks) < MAX_RELATIONSHIP_EXAMPLES:
+                                custom_ui_callbacks.append({
+                                    "part": _safe_text(info.filename, 300),
+                                    "element": _safe_text(local, 100),
+                                    "callback_attribute": _safe_text(callback_attribute, 80),
+                                    "callback_name": _safe_text(attribute_value, 160),
+                                })
+                            else:
+                                custom_ui_callbacks_truncated = True
                 if is_relationship_part and local == "relationship":
                     target_mode = node.attrib.get("TargetMode", "")
                     relationship_type = _safe_text(node.attrib.get("Type", ""), 240)
@@ -775,6 +884,19 @@ def analyze_office(
                                 partial = True
                     if target_mode.casefold() == "external":
                         features["external_relationship_count"] = int(features["external_relationship_count"]) + 1
+                        relationship_kind = _external_relationship_kind(relationship_type)
+                        if relationship_kind == "attached_template":
+                            features["external_attached_template_relationship_count"] = (
+                                int(features["external_attached_template_relationship_count"]) + 1
+                            )
+                        elif relationship_kind == "hyperlink":
+                            features["external_hyperlink_relationship_count"] = (
+                                int(features["external_hyperlink_relationship_count"]) + 1
+                            )
+                        elif relationship_kind == "external_link_path":
+                            features["external_link_relationship_count"] = (
+                                int(features["external_link_relationship_count"]) + 1
+                            )
                         if len(relationships) < MAX_RELATIONSHIP_EXAMPLES:
                             relationship_type = _safe_text(node.attrib.get("Type", ""), 240)
                             target = _safe_text(node.attrib.get("Target", ""), 500)
@@ -782,7 +904,7 @@ def analyze_office(
                             relationships.append({
                                 "source_part": _safe_text(source_part, 300),
                                 "source_relationship_part": _safe_text(info.filename, 300),
-                                "relationship_kind": _external_relationship_kind(relationship_type),
+                                "relationship_kind": relationship_kind,
                                 "relationship_type": relationship_type,
                                 "target_kind": target_kind,
                                 "target_scheme": target_scheme,
@@ -995,6 +1117,18 @@ def analyze_office(
                 unresolved_ole_references = True
             ole_object_references.append(reference)
 
+        if custom_ui_callbacks_truncated:
+            warnings.append(
+                f"Custom UI callback examples were capped at {MAX_RELATIONSHIP_EXAMPLES}; the total callback count remains available."
+            )
+        if content_type_validation["duplicate_default_extension_count"]:
+            warnings.append("Office content-type manifest contains duplicate Default mappings for an extension.")
+        if content_type_validation["duplicate_override_part_count"]:
+            warnings.append("Office content-type manifest contains duplicate Override mappings for a part.")
+        if content_type_validation["parts_without_declared_content_type_count"]:
+            warnings.append("Some Office package parts have no matching Default or Override content-type declaration.")
+        if content_type_validation["overrides_without_package_part_count"]:
+            warnings.append("Some Office content-type Override entries refer to package parts that are absent.")
         if ole_object_references_truncated:
             warnings.append(
                 f"OLE-object reference inventory was capped at {MAX_OLE_OBJECT_REFERENCES} entries."
@@ -1054,6 +1188,7 @@ def analyze_office(
             "activex_part_count": "Package contains ActiveX-related package parts.",
             "external_link_part_count": "Package contains external-link parts, often associated with linked workbook data.",
             "custom_ui_part_count": "Package contains custom Office UI parts.",
+            "custom_ui_callback_count": "Custom UI XML declares callback references such as onAction or onLoad; callback code was not resolved or executed.",
             "macro_sheet_part_count": "Package contains Excel macro-sheet parts.",
             "digital_signature_part_count": "Package contains XML signature parts; signature validity was not evaluated.",
             "ole_object_element_count": "Parsed XML contains OLE-object elements.",
@@ -1064,10 +1199,31 @@ def analyze_office(
             "formula_network_function_count": "Parsed worksheet formulas or Excel defined names contain selected external/dynamic-data functions.",
             "field_instruction_count": "Parsed Word field instructions contain link/import/DDE-related keywords.",
             "external_relationship_count": "Package relationships point to external targets; targets were not fetched.",
+            "external_attached_template_relationship_count": "External OOXML attached-template relationships were observed; the template target was not fetched or interpreted.",
+            "external_hyperlink_relationship_count": "External hyperlink relationships were observed; targets were not opened.",
+            "external_link_relationship_count": "External workbook-link-path relationships were observed; targets were not fetched.",
+            "external_connection_part_count": "Package contains Excel connections.xml metadata; connection targets were not contacted.",
+            "query_table_part_count": "Package contains Excel query-table parts; query definitions and remote data were not executed or fetched.",
             "encrypted_member_count": "Package contains encrypted ZIP members that were not read.",
             "unsafe_member_name_count": "Package contains absolute or traversal-like member names; no extraction was performed.",
             "duplicate_member_name_count": "Package contains duplicate ZIP member names; ambiguous entries were skipped.",
         }
+        if any((
+            content_type_validation["duplicate_default_extension_count"],
+            content_type_validation["duplicate_override_part_count"],
+            content_type_validation["parts_without_declared_content_type_count"],
+            content_type_validation["overrides_without_package_part_count"],
+        )):
+            evidence.append({
+                "evidence_type": "office_package_integrity",
+                "key": "office.content_type_validation",
+                "value": content_type_validation,
+                "severity": "warning",
+                "details": {
+                    "context_only": True,
+                    "interpretation": "OPC content-type declarations were compared with package part names; inconsistencies are package-structure observations, not malware findings.",
+                },
+            })
         for key, meaning in feature_meanings.items():
             value = features.get(key)
             if value is True or (isinstance(value, int) and not isinstance(value, bool) and value > 0):
@@ -1120,6 +1276,9 @@ def analyze_office(
                 "truncated": partial,
                 "extension_matches_detected_format": extension_matches,
                 "features": features,
+                "content_type_validation": content_type_validation,
+                "custom_ui_callbacks": custom_ui_callbacks,
+                "custom_ui_callbacks_truncated": custom_ui_callbacks_truncated,
                 "external_relationships": relationships,
                 "ole_object_references": ole_object_references,
                 "ole_object_references_truncated": ole_object_references_truncated,

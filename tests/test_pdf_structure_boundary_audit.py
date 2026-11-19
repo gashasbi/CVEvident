@@ -496,3 +496,35 @@ def test_escaped_pdf_name_is_recognized_lexically_and_structurally(
     assert marker["details"]["byte_offsets"] == [path.read_bytes().index(b"/Java#53cript")]
     assert report["structural_analysis"]["features"]["javascript_action_count"] == 1
     assert report["assessment"]["verdict"] == "not_assessed"
+
+
+def test_pdf_embedded_navigation_and_file_attachment_observations(monkeypatch):
+    embedded_action = DictionaryObject({
+        NameObject("/S"): NameObject("/GoToE")
+    })
+    attachment_annotation = DictionaryObject({
+        NameObject("/Type"): NameObject("/Annot"),
+        NameObject("/Subtype"): NameObject("/FileAttachment"),
+    })
+    file_spec = DictionaryObject({
+        NameObject("/AF"): ArrayObject([]),
+        NameObject("/EF"): DictionaryObject(),
+    })
+    root = DictionaryObject({
+        NameObject("/OpenAction"): embedded_action,
+        NameObject("/Annotation"): attachment_annotation,
+        NameObject("/FileSpec"): file_spec,
+    })
+    class FakePdfReader:
+        def __init__(self, stream, strict=False, root_object_recovery_limit=10_000):
+            self.trailer = DictionaryObject({NameObject("/Root"): root})
+            self.is_encrypted = False
+
+    monkeypatch.setattr(pypdf, "PdfReader", FakePdfReader)
+    parser = pdf_structure.analyze_pdf_structure.__wrapped__.__wrapped__
+    result = parser(b"%PDF-1.7\n", True)
+
+    assert result["status"] == "parsed"
+    assert result["features"]["embedded_goto_action_count"] == 1
+    assert result["features"]["file_attachment_annotations"] == 1
+    assert result["features"]["associated_file_entries"] == 1

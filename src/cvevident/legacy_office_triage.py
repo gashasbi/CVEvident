@@ -1165,8 +1165,10 @@ def analyze_legacy_office(path: str, max_bytes: int = 100 * 1024 * 1024) -> dict
             f"{stream_skipped_count} stream(s) were skipped due to configured resource limits."
         )
 
-    vba_related_names = {"vba", "dir", "_vba_project", "project", "projectwm"}
-    vba_present = "vba" in names or {"_vba_project", "project"}.issubset(names) or "projectwm" in names
+    vba_related_names = {"vba", "dir", "_vba_project", "project", "projectwm", "projectlk"}
+    stream_names = {entry["name"].casefold() for entry in stream_entries}
+    storage_names = {entry["name"].casefold() for entry in storage_entries}
+    vba_present = "vba" in storage_names or {"_vba_project", "dir"}.issubset(stream_names)
     encrypted_container = {"encryptedpackage", "encryptioninfo"}.issubset(names)
     embedded_entries = [entry for entry in entries if (
         entry["name"].casefold().startswith("mbd") or entry["name"].casefold() in {"objectpool", "ole10native"}
@@ -1176,6 +1178,12 @@ def analyze_legacy_office(path: str, max_bytes: int = 100 * 1024 * 1024) -> dict
     features = {
         "vba_project_present": bool(vba_present),
         "vba_related_directory_entry_count": sum(1 for n in names_lower if n in vba_related_names),
+        "vba_project_stream_name_present": "_vba_project" in stream_names,
+        "vba_directory_stream_name_present": "dir" in stream_names,
+        "vba_project_metadata_stream_name_present": "project" in stream_names,
+        "vba_storage_name_present": "vba" in storage_names,
+        "vba_project_workspace_stream_name_present": "projectwm" in stream_names,
+        "vba_project_link_stream_name_present": "projectlk" in stream_names,
         "embedded_object_indicator_count": len(embedded_entries),
         "external_link_stream_name_count": len(external_link_names),
         "encrypted_office_container_present": bool(encrypted_container),

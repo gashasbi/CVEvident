@@ -220,6 +220,7 @@ class LegacyOfficeTests(unittest.TestCase):
         data = build_cfb_with_root_tree([
             ("Root Entry", 5), ("WordDocument", 2), ("0Table", 2),
             ("VBA", 1), ("dir", 2), ("_VBA_PROJECT", 2), ("PROJECT", 2),
+            ("PROJECTwm", 2), ("PROJECTlk", 2),
         ])
         report = self.analyze("sample.doc", data)
         self.assertEqual(report["file"]["file_type"], "doc")
@@ -227,6 +228,13 @@ class LegacyOfficeTests(unittest.TestCase):
         self.assertEqual(report["legacy_office_analysis"]["status"], "parsed")
         self.assertIs(report["legacy_office_analysis"]["root_directory_entry_valid"], True)
         self.assertTrue(report["legacy_office_analysis"]["vba_project_present"])
+        features = report["legacy_office_analysis"]["features"]
+        self.assertTrue(features["vba_storage_name_present"])
+        self.assertTrue(features["vba_project_stream_name_present"])
+        self.assertTrue(features["vba_directory_stream_name_present"])
+        self.assertTrue(features["vba_project_metadata_stream_name_present"])
+        self.assertTrue(features["vba_project_workspace_stream_name_present"])
+        self.assertTrue(features["vba_project_link_stream_name_present"])
         self.assertEqual(report["assessment"]["verdict"], "not_assessed")
 
     def test_detects_excel_and_powerpoint_stream_families(self):

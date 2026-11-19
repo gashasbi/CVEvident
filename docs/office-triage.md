@@ -17,13 +17,13 @@ The package is identified from `[Content_Types].xml` and the package structure, 
 Within the declared limits, the parser inventories package members and selected XML parts. Depending on the file and the parts that can be safely inspected, findings may include:
 
 - VBA project binaries, ActiveX parts, embedded-object parts, and custom UI parts;
-- package relationships with external targets, including a bounded number of target examples;
-- Excel external-link parts and selected formula indicators associated with external content;
+- package relationships with external targets, including a bounded number of target examples and separate counts for external `attachedTemplate`, hyperlink, and external-link-path relationships;
+- Excel external-link parts, `connections.xml` metadata, query-table parts, and selected formula indicators associated with external content;
 - Word field instructions and `altChunk` indicators;
 - path-traversal-like or absolute package member names, duplicate names, encrypted members, and unreadable or malformed XML;
 - package main-part identity, parser status, counts of inspected XML parts/bytes, warnings, and truncation indicators.
 
-The presence of an indicator is contextual. For example, a macro-enabled document is not automatically malicious, and an external relationship is not proof that the relationship was used.
+An external `attachedTemplate` relationship is recorded separately because remote template references are a documented Office technique (MITRE ATT&CK [T1221](https://attack.mitre.org/techniques/T1221/)). CVEvident records the relationship metadata but never fetches the template. The presence of an indicator is contextual: a macro-enabled document, external relationship, connection, or query table is not automatically malicious, and no relationship is proof that a target was contacted or used.
 
 ## Safety boundaries
 
@@ -62,3 +62,11 @@ cvevident analyze ./document.docm \
 ```
 
 To inspect the human-readable output, use `--format markdown` or `--format html`. For an explanation of report interpretation and evidence bases, see [Analysis and reports](analysis-and-reports.md). For package families outside OOXML, see [Legacy Office, OpenDocument, and RTF triage](legacy-and-open-document-triage.md).
+
+## Open Packaging Conventions consistency
+
+The OOXML package report also checks the `[Content_Types].xml` declarations against the package member inventory. It accounts for both `Default` extension mappings and `Override` part mappings, compares part names using ASCII case-insensitive equivalence, and reports duplicate mappings, parts without a declared content type, and overrides that refer to absent parts. This follows ECMA-376 Part 2: every package part must resolve to a content type, and duplicate mappings for a given extension or part name are not permitted. These are package-integrity observations only; they do not indicate malware. See [ECMA-376 Part 2](https://ecma-international.org/publications-and-standards/standards/ecma-376/).
+
+## Custom UI callback references
+
+When a package contains a Custom UI part, CVEvident records declared RibbonX callback attributes such as `onLoad`, `loadImage`, `onAction`, and supported `get*` callbacks, along with the XML part and element where each reference occurs. Microsoft documents these attributes as references to callback procedures used by custom Office UI controls. The report records the callback name only; it does not resolve it to VBA or add-in code, and it does not invoke the callback. Custom UI callbacks are informational because legitimate Office add-ins and documents can use them. See [MS-CUSTOMUI: customUI root](https://learn.microsoft.com/en-us/openspecs/office_standards/ms-customui/8a27e852-3f8b-424a-ac67-32c58181e9d3), [MS-CUSTOMUI: elements](https://learn.microsoft.com/en-us/openspecs/office_standards/ms-customui/d842006e-3187-4f66-a17d-0819a3cc94b5), and [MS-CUSTOMUI: repurposed commands](https://learn.microsoft.com/en-us/openspecs/office_standards/ms-customui/21316865-fbce-4a3f-a9ff-a8277cce5f2d).

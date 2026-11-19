@@ -170,6 +170,27 @@ class OfficeTriageTests(unittest.TestCase):
         self.assertTrue(any("not opened" in warning.lower() for warning in office["warnings"]))
 
 
+    def test_external_attached_template_relationship_is_reported_separately(self):
+        extras = {
+            "word/_rels/document.xml.rels": (
+                '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                '<Relationship Id="rTemplate" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/attachedTemplate" '
+                'Target="https://example.test/template.dotm" TargetMode="External"/>'
+                '</Relationships>'
+            ).encode(),
+            "xl/connections.xml": b"<connections/>",
+            "xl/queryTables/queryTable1.xml": b"<queryTable/>",
+        }
+        path = create_office_package(self.root / "template.docm", "docm", extras)
+        report = analyze_office(str(path))
+        features = report["office_analysis"]["features"]
+
+        self.assertEqual(features["external_attached_template_relationship_count"], 1)
+        self.assertEqual(features["external_connection_part_count"], 1)
+        self.assertEqual(features["query_table_part_count"], 1)
+        self.assertEqual(report["office_analysis"]["external_relationships"][0]["relationship_kind"], "attached_template")
+        self.assertEqual(report["assessment"]["verdict"], "not_assessed")
+
     def test_ole_object_metadata_is_linked_to_internal_embedded_part(self):
         extras = {
             "word/document.xml": (

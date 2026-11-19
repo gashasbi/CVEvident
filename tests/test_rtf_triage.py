@@ -30,6 +30,30 @@ class RtfTriageTests(unittest.TestCase):
         self.assertGreater(analysis["features"]["external_target_count"], 0)
         self.assertEqual(report["assessment"]["verdict"], "not_assessed")
 
+    def test_field_instruction_types_are_counted_separately(self):
+        data = (
+            b'{\\rtf1\\ansi'
+            b'{\\field{\\*\\fldinst DDEAUTO "cmd /c echo INCLUDETEXT"}{\\fldrslt first}}'
+            b'{\\field{\\*\\fldinst INCLUDETEXT "https://example.test/a"}{\\fldrslt second}}'
+            b'}'
+        )
+        report = self.analyze("field-types.rtf", data)
+        features = report["rtf_analysis"]["features"]
+
+        self.assertEqual(features["field_instruction_ddeauto_count"], 1)
+        self.assertEqual(features["field_instruction_includetext_count"], 1)
+        self.assertEqual(features["field_instruction_indicator_count"], 2)
+        self.assertEqual(report["assessment"]["verdict"], "not_assessed")
+
+    def test_ole_object_type_controls_are_counted(self):
+        data = b'{\\rtf1{\\object\\objocx\\objdata 0011}{\\object\\objhtml\\objdata 2233}}'
+        report = self.analyze("object-types.rtf", data)
+        features = report["rtf_analysis"]["features"]
+
+        self.assertEqual(features["objocx_control_count"], 1)
+        self.assertEqual(features["objhtml_control_count"], 1)
+        self.assertEqual(features["object_group_indicator_count"], 6)
+
     def test_binary_payload_is_skipped_not_tokenized(self):
         data = b'{\\rtf1\\ansi\\bin8 ' + b'http://x!' + b' text}'
         report = self.analyze("binary.rtf", data)

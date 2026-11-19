@@ -25,37 +25,37 @@ DOMAIN_SCOPES = {
     "pdf": {
         "container_structure": "PDF catalog and object-graph traversal within configured object and depth budgets.",
         "content_inspection": "Lexical byte markers and parsed object dictionaries; page content streams are not decoded or rendered.",
-        "embedded_object_inventory": "Embedded-file name-tree and file-specification indicators; payloads are not extracted.",
-        "external_reference_inventory": "Parsed URI, link, and remote-go-to indicators; targets are not followed.",
+        "embedded_object_inventory": "Embedded-file name-tree, file-specification, associated-file, and file-attachment annotation indicators; payloads are not extracted.",
+        "external_reference_inventory": "Parsed URI, link, remote-go-to, and embedded-go-to indicators; targets are not followed.",
         "active_content_indicators": "Parsed action and JavaScript indicators; actions are never executed.",
     },
     "ooxml": {
         "container_structure": "ZIP member inventory, content types, and selected package relationships within configured limits.",
         "content_inspection": "Selected XML and relationship parts within configured limits; full document rendering is not performed.",
         "embedded_object_inventory": "Embedded package members and linked OLE metadata; payloads are not extracted or executed.",
-        "external_reference_inventory": "External relationship, hyperlink, and formula indicators; targets are not fetched.",
+        "external_reference_inventory": "External relationship, attached-template, external workbook-link, connection, hyperlink, and formula indicators; targets are not fetched.",
         "active_content_indicators": "VBA, ActiveX, macro-sheet, field, and formula indicators; content is not executed.",
     },
     "odf": {
         "container_structure": "ZIP member inventory and OpenDocument package metadata within configured limits.",
         "content_inspection": "Selected XML parts within configured limits; full document rendering is not performed.",
         "embedded_object_inventory": "Embedded-object package members and XML indicators; payloads are not extracted or executed.",
-        "external_reference_inventory": "External-reference and formula indicators in inspected XML; targets are not fetched.",
-        "active_content_indicators": "Script, Basic macro, event-listener, and formula indicators; content is not executed.",
+        "external_reference_inventory": "External-reference URI schemes and external script-reference indicators in inspected XML; targets are not fetched.",
+        "active_content_indicators": "Script, Basic macro, event-listener, macro-field, and formula indicators; content is not executed.",
     },
     "legacy_office": {
         "container_structure": "OLE/CFB header, allocation tables, directory, and bounded stream-chain structure.",
         "content_inspection": "Bounded stream reads for structural validation and file signatures only; stream bodies and VBA source are not interpreted.",
         "embedded_object_inventory": "CFB directory-name and storage indicators; embedded payloads are not extracted or interpreted.",
         "external_reference_inventory": "Legacy Office external-link stream-name indicators; targets are not resolved.",
-        "active_content_indicators": "VBA-related directory-name and macro-presence indicators only; VBA source is not parsed or executed.",
+        "active_content_indicators": "VBA storage and project-stream directory-name indicators only; VBA source is not parsed or executed.",
     },
     "rtf": {
         "container_structure": "RTF group and control-word scan within configured byte, depth, and control-word budgets.",
         "content_inspection": "Bounded lexical inspection of control words, field instructions, and binary payload boundaries; rendering is not performed.",
         "embedded_object_inventory": "RTF object and picture group indicators; payloads are not decoded.",
         "external_reference_inventory": "External target strings found in scanned field instructions; targets are not opened.",
-        "active_content_indicators": "Field-instruction and object-group indicators; instructions and objects are not executed.",
+        "active_content_indicators": "Field-instruction keyword and object-group indicators; instructions and objects are not executed.",
     },
 }
 
@@ -102,11 +102,17 @@ DOMAIN_OBSERVED_KEYS = {
         "embedded_object_inventory": (
             "embedded_files_name_tree_count",
             "file_specifications_with_embedded_data",
+            "associated_file_entries", "file_attachment_annotations",
         ),
-        "external_reference_inventory": ("uri_action_count", "remote_goto_action_count", "link_annotations"),
+        "external_reference_inventory": (
+            "uri_action_count", "remote_goto_action_count", "link_annotations",
+            "embedded_goto_action_count",
+        ),
         "active_content_indicators": (
             "javascript_action_count", "launch_action_count", "submit_form_action_count",
             "import_data_action_count", "reset_form_action_count", "rich_media_execute_action_count",
+            "embedded_goto_action_count", "optional_content_state_action_count",
+            "goto_3d_view_action_count", "xfa_present",
         ),
     },
     "ooxml": {
@@ -115,7 +121,9 @@ DOMAIN_OBSERVED_KEYS = {
         ),
         "external_reference_inventory": (
             "external_relationship_count", "external_link_part_count", "hyperlink_element_count",
-            "external_formula_reference_count",
+            "external_formula_reference_count", "external_attached_template_relationship_count",
+            "external_hyperlink_relationship_count", "external_link_relationship_count",
+            "external_connection_part_count", "query_table_part_count",
         ),
         "active_content_indicators": (
             "vba_project_present", "activex_part_count", "macro_sheet_part_count",
@@ -124,21 +132,32 @@ DOMAIN_OBSERVED_KEYS = {
     },
     "odf": {
         "embedded_object_inventory": ("embedded_object_member_count", "embedded_object_element_count"),
-        "external_reference_inventory": ("external_reference_count",),
+        "external_reference_inventory": ("external_reference_count", "external_script_reference_count"),
         "active_content_indicators": (
             "script_or_basic_member_count", "script_element_count", "script_event_listener_count",
-            "macro_named_member_count",
+            "macro_execution_field_count", "external_script_reference_count", "macro_named_member_count",
         ),
     },
     "legacy_office": {
         "embedded_object_inventory": ("embedded_object_indicator_count",),
         "external_reference_inventory": ("external_link_stream_name_count",),
-        "active_content_indicators": ("vba_project_present", "vba_related_directory_entry_count"),
+        "active_content_indicators": (
+            "vba_project_present", "vba_related_directory_entry_count",
+            "vba_project_stream_name_present", "vba_directory_stream_name_present",
+            "vba_project_metadata_stream_name_present", "vba_storage_name_present",
+            "vba_project_workspace_stream_name_present", "vba_project_link_stream_name_present",
+        ),
     },
     "rtf": {
         "embedded_object_inventory": ("object_group_indicator_count", "picture_group_indicator_count"),
         "external_reference_inventory": ("external_target_count",),
-        "active_content_indicators": ("field_instruction_group_count", "field_instruction_indicator_count"),
+        "active_content_indicators": (
+            "field_instruction_group_count", "field_instruction_indicator_count",
+            "field_instruction_ddeauto_count", "field_instruction_dde_count",
+            "field_instruction_includetext_count", "field_instruction_includepicture_count",
+            "field_instruction_hyperlink_count", "field_instruction_database_count",
+            "field_instruction_import_count", "field_instruction_link_count",
+        ),
     },
 }
 

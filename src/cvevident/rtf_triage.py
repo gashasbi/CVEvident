@@ -15,10 +15,14 @@ MAX_RTF_CONTROL_WORDS = 1_000_000
 
 _CONTROL_INDICATORS = {
     "object", "objdata", "objclass", "objname", "objtime", "objupdate", "objautlink", "objemb", "objlink",
+    "objocx", "objhtml", "objsub", "objpub",
     "pict", "shppict", "nonshppict", "field", "fldinst", "fldrslt", "fldpriv", "datafield",
     "formfield", "filetbl", "xmlopen", "htmltag", "htmlrtf", "htmlbase", "datastore", "bin",
 }
 _FIELD_RISK_WORDS = re.compile(rb"(?i)\b(?:DDEAUTO|DDE|INCLUDETEXT|INCLUDEPICTURE|HYPERLINK|DATABASE|IMPORT|LINK)\b")
+_FIELD_KEYWORDS = (
+    "DDEAUTO", "DDE", "INCLUDETEXT", "INCLUDEPICTURE", "HYPERLINK", "DATABASE", "IMPORT", "LINK",
+)
 _URL_LITERAL = re.compile(rb"(?i)(?:https?|ftp|file|mailto|smb):[^\s\"'<>}{]{1,2048}|\\\\[^\s\"'<>}{]{1,2048}")
 _CONTROL_WORD_START = frozenset(b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
 _HEX = frozenset(b"0123456789abcdefABCDEF")
@@ -274,6 +278,13 @@ def _scan_rtf(data: bytes) -> dict[str, Any]:
             )
         )
     field_instructions = bytes(field_text)
+    normalized_instructions = _strip_rtf_field_argument_literals(field_instructions.replace(b"\x00", b" "))
+    field_keyword_counts = {
+        keyword.casefold(): sum(
+            1 for _ in re.finditer(rb"(?i)\b" + keyword.encode("ascii") + rb"\b", normalized_instructions)
+        )
+        for keyword in _FIELD_KEYWORDS
+    }
     url_count = sum(1 for _ in _URL_LITERAL.finditer(field_instructions.replace(b"\x00", b" ")))
     field_examples: list[str] = []
     segment_start = 0
@@ -296,6 +307,7 @@ def _scan_rtf(data: bytes) -> dict[str, Any]:
         "control_counts": dict(controls),
         "field_instruction_examples": field_examples,
         "field_instruction_indicator_count": risk_word_count,
+        "field_instruction_keyword_counts": field_keyword_counts,
         "external_target_count": url_count,
         "group_balance": None if negative_balance else depth,
         "maximum_group_depth": max_depth,
@@ -343,12 +355,17 @@ def analyze_rtf(path: str, max_bytes: int = 100 * 1024 * 1024,
     status = "partial" if truncated or warnings else "parsed"
     features: dict[str, Any] = {f"{name}_control_count": count for name, count in scan["control_counts"].items()}
     features.update({
-        "object_group_indicator_count": sum(scan["control_counts"].get(k, 0) for k in ("object", "objdata", "objemb", "objlink", "objautlink")),
+        "object_group_indicator_count": sum(
+            scan["control_counts"].get(k, 0)
+            for k in ("object", "objdata", "objemb", "objlink", "objautlink", "objocx", "objhtml", "objsub", "objpub")
+        ),
         "picture_group_indicator_count": sum(scan["control_counts"].get(k, 0) for k in ("pict", "shppict", "nonshppict")),
         "field_instruction_group_count": scan["control_counts"].get("fldinst", 0),
         "field_instruction_indicator_count": scan["field_instruction_indicator_count"],
         "external_target_count": scan["external_target_count"],
     })
+    for keyword, count in scan["field_instruction_keyword_counts"].items():
+        features[f"field_instruction_{keyword}_count"] = count
     report = {
         "report_schema_version": 2,
         "tool": "CVEvident",

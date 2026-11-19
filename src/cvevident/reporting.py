@@ -230,9 +230,11 @@ def to_markdown(report: dict[str, Any]) -> str:
         features = structural.get("features", {})
         selected = (
             "javascript_action_count", "launch_action_count", "uri_action_count",
-            "remote_goto_action_count", "annotations_total", "link_annotations",
+            "remote_goto_action_count", "embedded_goto_action_count",
+            "optional_content_state_action_count", "goto_3d_view_action_count",
+            "annotations_total", "link_annotations", "file_attachment_annotations",
             "embedded_files_name_tree_count", "file_specifications_with_embedded_data",
-            "acroform_present", "rich_media_indicators",
+            "associated_file_entries", "acroform_present", "xfa_present", "rich_media_indicators",
         )
         lines += ["", "| Structural feature | Observed value |", "|---|---:|"]
         for key in selected:

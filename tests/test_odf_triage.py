@@ -114,6 +114,45 @@ class OdfTriageTests(unittest.TestCase):
         self.assertEqual(report["odf_analysis"]["status"], "partial")
         self.assertTrue(any("traversal-like" in warning for warning in report["warnings"]))
 
+    def test_external_reference_schemes_are_recorded_without_fetching(self):
+        content = (
+            '<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" '
+            'xmlns:xlink="http://www.w3.org/1999/xlink">'
+            '<office:body><office:text><text:p xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0">'
+            '<text:a xlink:href="https://example.test/resource">link</text:a>'
+            '<text:a xlink:href="file:///tmp/resource">local</text:a>'
+            '</text:p></office:text></office:body></office:document-content>'
+        )
+        report = self.analyze("external-refs.odt", build_odf(content=content))
+        analysis = report["odf_analysis"]
+
+        self.assertEqual(analysis["features"]["external_reference_count"], 2)
+        self.assertEqual(analysis["external_reference_schemes"], {"https": 1, "file": 1})
+        self.assertTrue(all(item["scheme"] in {"https", "file"} for item in analysis["external_references"]))
+        self.assertEqual(report["assessment"]["verdict"], "not_assessed")
+
+    def test_script_event_metadata_and_macro_fields_are_counted(self):
+        content = (
+            '<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" '
+            'xmlns:script="urn:oasis:names:tc:opendocument:xmlns:script:1.0" '
+            'xmlns:xlink="http://www.w3.org/1999/xlink" '
+            'xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0">'
+            '<office:body><office:text><office:event-listeners>'
+            '<script:event-listener script:language="ooo:Basic" script:macro-name="Main" '
+            'xlink:href="https://example.test/script"/>'
+            '</office:event-listeners><text:p><text:execute-macro text:name="Main"/></text:p>'
+            '</office:text></office:body></office:document-content>'
+        )
+        report = self.analyze("script-metadata.odt", build_odf(content=content))
+        features = report["odf_analysis"]["features"]
+
+        self.assertEqual(features["script_event_listener_count"], 1)
+        self.assertEqual(features["macro_execution_field_count"], 1)
+        self.assertEqual(features["external_script_reference_count"], 1)
+        self.assertEqual(report["odf_analysis"]["script_language_counts"], {"ooo:basic": 1})
+        self.assertTrue(any(item["key"] == "odf.script_language_counts" for item in report["evidence"]))
+        self.assertEqual(report["assessment"]["verdict"], "not_assessed")
+
     def test_compressed_mimetype_marks_partial(self):
         report = self.analyze("compressed-mimetype.odt", build_odf(compress_mimetype=True))
         self.assertEqual(report["odf_analysis"]["status"], "partial")

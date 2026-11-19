@@ -236,6 +236,9 @@ _ACTION_TYPES = {
     "/Launch": "launch_action_count",
     "/URI": "uri_action_count",
     "/GoToR": "remote_goto_action_count",
+    "/GoToE": "embedded_goto_action_count",
+    "/SetOCGState": "optional_content_state_action_count",
+    "/GoTo3DView": "goto_3d_view_action_count",
     "/SubmitForm": "submit_form_action_count",
     "/ImportData": "import_data_action_count",
     "/ResetForm": "reset_form_action_count",
@@ -278,6 +281,9 @@ def _base_result(status: str, parser_version: str | None = None) -> dict[str, An
             "launch_action_count": 0,
             "uri_action_count": 0,
             "remote_goto_action_count": 0,
+            "embedded_goto_action_count": 0,
+            "optional_content_state_action_count": 0,
+            "goto_3d_view_action_count": 0,
             "submit_form_action_count": 0,
             "import_data_action_count": 0,
             "reset_form_action_count": 0,
@@ -292,9 +298,12 @@ def _base_result(status: str, parser_version: str | None = None) -> dict[str, An
             "javascript_name_tree_present": False,
             "embedded_files_name_tree_count": 0,
             "file_specifications_with_embedded_data": 0,
+            "associated_file_entries": 0,
+            "file_attachment_annotations": 0,
             "annotations_total": 0,
             "link_annotations": 0,
             "acroform_present": False,
+            "xfa_present": False,
             "rich_media_indicators": 0,
             "stream_objects_seen": 0,
             "catalog_open_action_present": False,
@@ -380,6 +389,15 @@ def analyze_pdf_structure(data: bytes, is_pdf: bool) -> dict[str, Any]:
         features["catalog_open_action_present"] = "/OpenAction" in root_obj
         features["catalog_additional_actions_present"] = "/AA" in root_obj
         features["acroform_present"] = "/AcroForm" in root_obj
+        if "/AcroForm" in root_obj:
+            try:
+                acroform = root_obj.get("/AcroForm")
+                if isinstance(acroform, IndirectObject):
+                    acroform = acroform.get_object()
+                features["xfa_present"] = isinstance(acroform, DictionaryObject) and "/XFA" in acroform
+            except Exception as exc:
+                result["resolution_errors"] += 1
+                result["resolution_error_types"].append(type(exc).__name__)
 
         # /Count is a declared page count. It is recorded as a declaration, not used to
         # iterate through every page, avoiding unbounded page-tree traversal here.
@@ -494,6 +512,11 @@ def analyze_pdf_structure(data: bytes, is_pdf: bool) -> dict[str, Any]:
                     record_finding("embedded_files_name_tree", True, finding_path, object_reference,
                                    {"containing_dictionary_path": object_path}, finding_path_truncated)
                 features["file_specifications_with_embedded_data"] += int("/EF" in obj)
+                features["associated_file_entries"] += int("/AF" in obj)
+                if "/AF" in obj:
+                    associated_path, associated_path_truncated = _join_object_path(object_path, "/AF", path_truncated)
+                    record_finding("associated_file_entry", True, associated_path, object_reference,
+                                   {"containing_dictionary_path": object_path}, associated_path_truncated)
                 if "/EF" in obj:
                     finding_path, finding_path_truncated = _join_object_path(object_path, "/EF", path_truncated)
                     record_finding("embedded_file_data_entry", True, finding_path, object_reference,
@@ -531,6 +554,8 @@ def analyze_pdf_structure(data: bytes, is_pdf: bool) -> dict[str, Any]:
                                    {"annotation_subtype": subtype}, subtype_path_truncated)
                     if subtype == "/Link":
                         features["link_annotations"] += 1
+                    elif subtype == "/FileAttachment":
+                        features["file_attachment_annotations"] += 1
 
                 action_type = str(obj.get("/S", ""))
                 if action_type in _ACTION_TYPES:
