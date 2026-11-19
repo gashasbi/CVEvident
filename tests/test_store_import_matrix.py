@@ -195,6 +195,28 @@ def test_epss_import_preserves_official_model_and_score_date_metadata(tmp_path: 
     assert "model_version=v2026.06.15" in source["details"]
     assert "score_date=2026-11-19T00:00:00Z" in source["details"]
 
+
+def test_epss_gzip_import_preserves_model_and_score_date_metadata(tmp_path: Path) -> None:
+    import gzip
+
+    db_path = init_db(tmp_path / "epss-gzip.sqlite3")
+    path = tmp_path / "scores.csv.gz"
+    with gzip.open(path, "wt", encoding="utf-8", newline="") as handle:
+        handle.write(
+            "#model_version:v2026.06.15,score_date:2026-11-19T00:00:00Z\n"
+            "cve,epss,percentile\n"
+            "CVE-2024-1003,0.2,0.8\n"
+        )
+
+    assert import_epss_csv(path, db_path) == 1
+
+    with connect(db_path) as conn:
+        details = conn.execute(
+            "SELECT details FROM source_sync WHERE source='FIRST EPSS'"
+        ).fetchone()["details"]
+    assert "model_version=v2026.06.15" in details
+    assert "score_date=2026-11-19T00:00:00Z" in details
+
 def test_reference_sample_import_skips_non_object_samples_and_non_object_links(tmp_path: Path) -> None:
     db_path = init_db(tmp_path / "samples.sqlite3")
     path = _write_json(tmp_path / "samples.json", {"samples": [None, "not-a-row", _sample()]})
