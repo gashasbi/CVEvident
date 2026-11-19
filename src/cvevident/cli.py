@@ -140,7 +140,26 @@ def _render(report: dict[str, Any], fmt: str) -> str:
     return serialize_json(report)
 
 
-def _expected_schema() -> tuple[set[str], dict[str, set[str]], set[str]]:
+def _index_definitions(conn: sqlite3.Connection) -> dict[str, tuple[str, bool, tuple[str | None, ...]]]:
+    """Return named index table, uniqueness, and ordered columns."""
+    definitions: dict[str, tuple[str, bool, tuple[str | None, ...]]] = {}
+    rows = conn.execute(
+        "SELECT name, tbl_name FROM sqlite_master WHERE type='index' "
+        "AND name NOT LIKE 'sqlite_autoindex_%'"
+    )
+    for name, table in rows:
+        quoted_table = '"' + table.replace('"', '""') + '"'
+        quoted_name = '"' + name.replace('"', '""') + '"'
+        index_list = conn.execute(f"PRAGMA index_list({quoted_table})")
+        unique = any(row[1] == name and bool(row[2]) for row in index_list)
+        columns = tuple(row[2] for row in conn.execute(f"PRAGMA index_info({quoted_name})"))
+        definitions[name] = (table, unique, columns)
+    return definitions
+
+
+def _expected_schema() -> tuple[
+    set[str], dict[str, set[str]], dict[str, tuple[str, bool, tuple[str | None, ...]]]
+]:
     expected = sqlite3.connect(":memory:")
     expected.executescript(SCHEMA)
 
@@ -153,12 +172,7 @@ def _expected_schema() -> tuple[set[str], dict[str, set[str]], set[str]]:
         table: {row[1] for row in expected.execute(f"PRAGMA table_info({table})")}
         for table in tables
     }
-    indexes = {
-        row[0] for row in expected.execute(
-            "SELECT name FROM sqlite_master WHERE type='index' "
-            "AND name NOT LIKE 'sqlite_autoindex_%'"
-        )
-    }
+    indexes = _index_definitions(expected)
     expected.close()
     return tables, columns, indexes
 
@@ -179,6 +193,7 @@ def _doctor(db_path: str) -> dict[str, Any]:
             "missing_tables": [],
             "missing_columns": {},
             "missing_indexes": [],
+            "invalid_indexes": [],
             "healthy": False,
             "error": "Database file does not exist.",
         })
@@ -203,13 +218,12 @@ def _doctor(db_path: str) -> dict[str, Any]:
             for table in sorted(expected_tables & actual_tables)
             if expected_columns[table] - actual_columns[table]
         }
-        actual_indexes = {
-            row[0] for row in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='index' "
-                "AND name NOT LIKE 'sqlite_autoindex_%'"
-            )
-        }
-        missing_indexes = sorted(expected_indexes - actual_indexes)
+        actual_indexes = _index_definitions(conn)
+        missing_indexes = sorted(set(expected_indexes) - set(actual_indexes))
+        invalid_indexes = sorted(
+            name for name in set(expected_indexes) & set(actual_indexes)
+            if expected_indexes[name] != actual_indexes[name]
+        )
 
         schema_actual = None
         if {"key", "value"}.issubset(actual_columns.get("schema_meta", set())):
@@ -227,6 +241,7 @@ def _doctor(db_path: str) -> dict[str, Any]:
         "missing_tables": missing_tables,
         "missing_columns": missing_columns,
         "missing_indexes": missing_indexes,
+        "invalid_indexes": invalid_indexes,
     })
     result["healthy"] = (
         result["integrity_check"] == "ok"
@@ -234,6 +249,7 @@ def _doctor(db_path: str) -> dict[str, Any]:
         and not missing_tables
         and not missing_columns
         and not missing_indexes
+        and not invalid_indexes
     )
     return result
 
