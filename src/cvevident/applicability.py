@@ -140,7 +140,7 @@ def _wildcard_matches(pattern: str, value: str) -> bool:
     index = 0
     while index < len(pattern):
         char = pattern[index]
-        if char == "\\\\":
+        if char == "\\":
             index += 1
             expression.append(re.escape(pattern[index]))
         elif char == "*":
