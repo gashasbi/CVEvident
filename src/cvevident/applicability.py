@@ -186,6 +186,8 @@ def _version_matches(criteria: dict[str, str], match: dict[str, Any], target: di
     )
     declared = [(key, operator, match.get(key)) for key, operator in bounds if match.get(key) not in (None, "")]
     if declared:
+        if criteria_version != "*" or criteria["update"] != "*":
+            return None
         for _, operator, boundary in declared:
             comparison = _compare_versions(target_version, str(boundary))
             if comparison is None:
@@ -198,14 +200,13 @@ def _version_matches(criteria: dict[str, str], match: dict[str, Any], target: di
             }[operator]
             if not inside:
                 return False
-        if criteria_version not in {"*", "-"}:
-            version_match = _field_matches(criteria_version, target["version"])
-            if version_match is None:
-                return None
-            if not version_match:
-                return False
         return True
-    return _field_matches(criteria_version, target["version"])
+    if target["version"] == "*" and criteria_version != "*":
+        return None
+    relation = _attribute_relation(criteria_version, target["version"])
+    if relation is None:
+        return None
+    return relation in {"equal", "superset"}
 
 
 def _match_cpe(criteria_text: str, match: dict[str, Any], target_text: str) -> tuple[bool | None, dict[str, Any]]:
