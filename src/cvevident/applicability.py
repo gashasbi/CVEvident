@@ -136,6 +136,7 @@ def _has_unescaped_wildcard(value: str) -> bool:
 
 def _wildcard_matches(pattern: str, value: str) -> bool:
     """Match a CPE source value against one concrete target value."""
+    pattern = unicodedata.normalize("NFKC", pattern).casefold()
     expression: list[str] = []
     index = 0
     while index < len(pattern):
