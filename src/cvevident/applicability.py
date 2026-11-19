@@ -156,6 +156,8 @@ def _wildcard_matches(pattern: str, value: str) -> bool:
 
 def _attribute_relation(source: str, target: str) -> str | None:
     """Return the NIST CPE 2.3 relation from source attribute to target."""
+    if target != "*" and _has_unescaped_wildcard(target):
+        return None
     if source == target:
         return "equal"
     if source == "*":
@@ -164,8 +166,6 @@ def _attribute_relation(source: str, target: str) -> str | None:
         return "subset"
     if source == "-" or target == "-":
         return "disjoint"
-    if _has_unescaped_wildcard(target):
-        return None
     if _has_unescaped_wildcard(source):
         return "superset" if _wildcard_matches(source, _decode(target)) else "disjoint"
     source_value = unicodedata.normalize("NFKC", _decode(source)).casefold()
