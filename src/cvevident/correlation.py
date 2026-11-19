@@ -160,7 +160,7 @@ def correlate_evidence_rules(report: dict[str, Any], db_path: str | None = None)
             (
                 "One or more configured evidence groups matched. At least one matching rule is independently marked verified; this is not proof of exploitability."
                 if verified_matches else
-                "One or more configured evidence groups matched, but none of the matching rules is independently marked verified. Treat this as an unverified configured match, not a validated CVE relationship."
+                "One or more configured evidence groups matched, but none is independently marked verified. Treat this as an unverified configured match, not a validated CVE relationship."
             ) if item["status"] == "MATCH" else
             "No configured evidence group matched, and at least one required observation had incomplete or unavailable parser coverage; absence is not established."
             if item["status"] == "UNKNOWN" else

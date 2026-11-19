@@ -478,7 +478,7 @@ class MigrationTests(unittest.TestCase):
             with connect(path) as migrated:
                 columns = {row[1] for row in migrated.execute("PRAGMA table_info(source_sync)")}
                 self.assertIn("last_attempt_at", columns)
-                self.assertEqual(migrated.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0], "3")
+                self.assertEqual(migrated.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0], "4")
                 self.assertIsNotNone(migrated.execute(
                     "SELECT 1 FROM sqlite_master WHERE type='table' AND name='evidence_rules'"
                 ).fetchone())
