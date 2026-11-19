@@ -194,6 +194,7 @@ def _doctor(db_path: str) -> dict[str, Any]:
             "missing_columns": {},
             "missing_indexes": [],
             "invalid_indexes": [],
+            "foreign_key_violations": [],
             "healthy": False,
             "error": "Database file does not exist.",
         })
@@ -202,6 +203,15 @@ def _doctor(db_path: str) -> dict[str, Any]:
     expected_tables, expected_columns, expected_indexes = _expected_schema()
     with connect(path) as conn:
         result["integrity_check"] = conn.execute("PRAGMA integrity_check").fetchone()[0]
+        foreign_key_violations = [
+            {
+                "table": row[0],
+                "rowid": row[1],
+                "parent_table": row[2],
+                "foreign_key_id": row[3],
+            }
+            for row in conn.execute("PRAGMA foreign_key_check")
+        ]
 
         actual_tables = {
             row[0] for row in conn.execute(
@@ -242,6 +252,7 @@ def _doctor(db_path: str) -> dict[str, Any]:
         "missing_columns": missing_columns,
         "missing_indexes": missing_indexes,
         "invalid_indexes": invalid_indexes,
+        "foreign_key_violations": foreign_key_violations,
     })
     result["healthy"] = (
         result["integrity_check"] == "ok"
@@ -250,6 +261,7 @@ def _doctor(db_path: str) -> dict[str, Any]:
         and not missing_columns
         and not missing_indexes
         and not invalid_indexes
+        and not foreign_key_violations
     )
     return result
 
