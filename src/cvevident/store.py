@@ -379,6 +379,21 @@ def import_kev_json(path: str | Path, db_path: str | Path | None = None) -> int:
         message = "Expected CISA KEV JSON with a 'vulnerabilities' array"
         _record_source_import_failure(db_path, "CISA KEV", message)
         raise ValueError(message)
+    catalog_metadata: dict[str, str] = {}
+    if isinstance(payload, dict):
+        for source_key, detail_key in (
+            ("catalogVersion", "catalog_version"),
+            ("dateReleased", "date_released"),
+        ):
+            value = payload.get(source_key)
+            if isinstance(value, str) and value.strip():
+                catalog_metadata[detail_key] = value.strip()[:100]
+    catalog_count = payload.get("count") if isinstance(payload, dict) else None
+    catalog_count_mismatch = (
+        type(catalog_count) is int and catalog_count >= 0 and catalog_count != len(rows)
+    )
+    if type(catalog_count) is int and catalog_count >= 0:
+        catalog_metadata["catalog_count"] = str(catalog_count)
     validated_rows: list[tuple[dict[str, Any], str]] = []
     skipped_invalid_rows = 0
     for record_index, row in enumerate(rows, start=1):
@@ -412,9 +427,16 @@ def import_kev_json(path: str | Path, db_path: str | Path | None = None) -> int:
                 f"Imported {source_path.name}; valid_rows={count}; "
                 f"skipped_invalid_rows={skipped_invalid_rows}"
             )
+            if catalog_metadata:
+                metadata_details = "; ".join(
+                    f"{key}={value}" for key, value in sorted(catalog_metadata.items())
+                )
+                details += f"; {metadata_details}"
+            if catalog_count_mismatch:
+                details += f"; catalog_count_mismatch=declared:{catalog_count},actual:{len(rows)}"
             _update_source_sync(
                 conn, "CISA KEV", count, details,
-                status="partial" if skipped_invalid_rows else "success",
+                status="partial" if skipped_invalid_rows or catalog_count_mismatch else "success",
             )
     except Exception as exc:
         _record_source_import_failure(db_path, "CISA KEV", str(exc))
