@@ -7,9 +7,11 @@ from pathlib import Path
 
 import pytest
 
+from cvevident import cli
 from cvevident.db import connect, init_db
 from cvevident.store import (
     get_analysis,
+    get_cve,
     import_epss_csv,
     import_kev_json,
     import_nvd_json,
@@ -114,6 +116,44 @@ def test_kev_import_skips_invalid_rows_and_only_records_http_notes(tmp_path: Pat
         ("CVE-2024-1234", 1), ("CVE-2024-5678", 1)
     ]
     assert [row["url"] for row in refs] == ["https://example.test/kev"]
+
+
+def test_kev_catalog_metadata_is_available_from_cve_details_and_cli(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    db_path = init_db(tmp_path / "kev-details.sqlite3")
+    kev_record = {
+        "cveID": "CVE-2024-1234",
+        "vendorProject": "Example Vendor",
+        "product": "Example Product",
+        "vulnerabilityName": "Example remote code execution",
+        "dateAdded": "2024-01-10",
+        "shortDescription": "Example vulnerability description",
+        "requiredAction": "Apply the vendor update.",
+        "dueDate": "2024-02-10",
+        "knownRansomwareCampaignUse": "Known",
+        "notes": "https://example.test/kev-notes",
+        "cwes": ["CWE-79"],
+    }
+    path = _write_json(tmp_path / "kev-details.json", {"vulnerabilities": [kev_record]})
+
+    assert import_kev_json(path, db_path) == 1
+
+    details = get_cve("CVE-2024-1234", db_path)
+    assert details is not None
+    kev_observations = [
+        item for item in details["source_observations"]
+        if item["source_name"] == "CISA KEV"
+    ]
+    assert len(kev_observations) == 1
+    assert kev_observations[0]["source_record"] == kev_record
+
+    assert cli.main(["--db", str(db_path), "show-cve", "CVE-2024-1234"]) == 0
+    shown = json.loads(capsys.readouterr().out)
+    assert "raw_json" not in shown
+    assert shown["source_observations"][0]["source_record"]["requiredAction"] == (
+        "Apply the vendor update."
+    )
 
 
 def test_epss_import_skips_bad_ids_numbers_and_out_of_range_values(tmp_path: Path) -> None:

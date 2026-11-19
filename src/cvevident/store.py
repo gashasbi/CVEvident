@@ -932,6 +932,18 @@ def get_cve(cve_id: str, db_path: str | Path | None = None) -> dict[str, Any] | 
             "version_end_including,version_end_excluding,vulnerable FROM affected_products WHERE cve_id=? ORDER BY vendor,product",
             (cve_id,),
         ).fetchall()]
+        result["source_observations"] = []
+        for observation in conn.execute(
+            "SELECT source_name,observed_at,source_updated_at,source_record_json "
+            "FROM source_observations WHERE cve_id=? ORDER BY source_name,id",
+            (cve_id,),
+        ):
+            item = dict(observation)
+            try:
+                item["source_record"] = json.loads(item.pop("source_record_json"))
+            except (TypeError, json.JSONDecodeError):
+                item["source_record"] = None
+            result["source_observations"].append(item)
         return result
 
 
