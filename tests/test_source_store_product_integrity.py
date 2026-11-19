@@ -246,7 +246,7 @@ def test_kev_import_prevalidates_all_rows_before_mutating_database(tmp_path: Pat
     assert "skipped_invalid_rows=1" in state["details"]
 
 
-def test_reference_sample_import_skips_non_object_row(tmp_path: Path) -> None:
+def test_reference_sample_import_rejects_non_object_row_atomically(tmp_path: Path) -> None:
     db = tmp_path / "local.sqlite3"
     init_db(db)
     source = tmp_path / "samples.json"
@@ -260,10 +260,11 @@ def test_reference_sample_import_skips_non_object_row(tmp_path: Path) -> None:
     }
     source.write_text(json.dumps({"samples": [sample, None]}), encoding="utf-8")
 
-    assert import_reference_samples_json(source, db) == 1
+    with pytest.raises(ValueError, match="Sample 2 must be a JSON object"):
+        import_reference_samples_json(source, db)
 
     with connect(db) as conn:
-        assert conn.execute("SELECT COUNT(*) FROM reference_samples").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM reference_samples").fetchone()[0] == 0
 
 
 def test_reference_sample_import_rolls_back_when_cve_link_is_invalid(tmp_path: Path) -> None:
