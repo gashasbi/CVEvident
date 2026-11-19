@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
-from .db import connect
+from .db import connect, init_db
 from .evidence_engine import build_cve_associations, build_environment_context, build_product_context, evidence_summary
 from .correlation import correlate_evidence_rules
 from .evidence_trace import append_product_context_evidence, append_reported_source_evidence, finalize_evidence_traceability
@@ -29,6 +29,7 @@ def analyze_file(path: str | Path, db_path: str | Path | None = None,
                  candidate_limit: int = 10, target_vendor: str | None = None,
                  target_version: str | None = None,
                  environment_cpes: list[str] | None = None) -> dict[str, Any]:
+    init_db(db_path)
     input_path = Path(path).expanduser()
     suffix = input_path.suffix.lower()
     try:
