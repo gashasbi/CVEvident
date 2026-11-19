@@ -335,41 +335,55 @@ def _combine(values: list[bool | None], operator: str) -> bool | None:
 def _evaluate_node(node: Any, environment_cpes: list[str], matches: list[dict[str, Any]]) -> bool | None:
     if not isinstance(node, dict):
         return None
-    operator = str(node.get("operator") or "OR").upper()
-    if operator not in {"AND", "OR"}:
+
+    operator = node.get("operator", "OR")
+    if not isinstance(operator, str) or operator.upper() not in {"AND", "OR"}:
         return None
+    operator = operator.upper()
+
+    negate = node.get("negate", False)
+    if not isinstance(negate, bool):
+        return None
+
     values: list[bool | None] = []
-    cpe_matches = node.get("cpeMatch")
-    if isinstance(cpe_matches, list):
-        for entry in cpe_matches:
-            if not isinstance(entry, dict):
-                values.append(None)
-                continue
-            criteria = entry.get("criteria") or entry.get("cpe23Uri")
-            if not isinstance(criteria, str):
-                values.append(None)
-                continue
-            results = [
-                _match_cpe(criteria, entry, environment_cpe)
-                for environment_cpe in environment_cpes
-            ]
-            matched = next((detail for result, detail in results if result is True), None)
-            if matched is not None:
-                values.append(True)
-                matches.append(matched)
-            elif any(result is None for result, _ in results):
-                values.append(None)
-                matches.extend(detail for result, detail in results if result is None)
-            else:
-                values.append(False)
-    children = node.get("nodes")
-    if not isinstance(children, list):
-        children = node.get("children")
-    if isinstance(children, list):
-        for child in children:
-            values.append(_evaluate_node(child, environment_cpes, matches))
+    if "cpeMatch" in node:
+        cpe_matches = node["cpeMatch"]
+        if not isinstance(cpe_matches, list):
+            values.append(None)
+        else:
+            for entry in cpe_matches:
+                if not isinstance(entry, dict):
+                    values.append(None)
+                    continue
+                criteria = entry.get("criteria") or entry.get("cpe23Uri")
+                if not isinstance(criteria, str):
+                    values.append(None)
+                    continue
+                results = [
+                    _match_cpe(criteria, entry, environment_cpe)
+                    for environment_cpe in environment_cpes
+                ]
+                matched = next((detail for result, detail in results if result is True), None)
+                if matched is not None:
+                    values.append(True)
+                    matches.append(matched)
+                elif any(result is None for result, _ in results):
+                    values.append(None)
+                    matches.extend(detail for result, detail in results if result is None)
+                else:
+                    values.append(False)
+
+    child_field = "nodes" if "nodes" in node else "children" if "children" in node else None
+    if child_field is not None:
+        children = node[child_field]
+        if not isinstance(children, list):
+            values.append(None)
+        else:
+            for child in children:
+                values.append(_evaluate_node(child, environment_cpes, matches))
+
     result = _combine(values, operator)
-    if node.get("negate") is True:
+    if negate:
         return None if result is None else not result
     return result
 
