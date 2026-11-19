@@ -84,7 +84,7 @@ def _valid_cpe_component(value: str) -> bool:
             break
 
     if index == body_start:
-        return False
+        return bool(value) and all(char == "?" for char in value)
 
     return _consume_special(value, index) == len(value)
 
@@ -197,8 +197,7 @@ def _version_matches(criteria: dict[str, str], match: dict[str, Any], target: di
                 "ge": comparison >= 0,
                 "gt": comparison > 0,
                 "le": comparison <= 0,
-                "lt": comparison < 0,
-            }[operator]
+                "lt": comparison < 0,            }[operator]
             if not inside:
                 return False
         return True
@@ -397,8 +396,7 @@ def evaluate_nvd_configurations(raw_cve: dict[str, Any] | None, environment_cpes
     configurations = (raw_cve or {}).get("configurations")
     if not isinstance(configurations, list) or not configurations:
         return {
-            "status": "unknown",
-            "result": "nvd_configurations_unavailable",
+            "status": "unknown",            "result": "nvd_configurations_unavailable",
             "environment_cpes": supplied,
             "matched_conditions": [],
             "interpretation": "The local CVE record does not contain an evaluable NVD configuration tree.",
