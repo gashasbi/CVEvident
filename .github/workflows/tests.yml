@@ -72,7 +72,7 @@ jobs:
 
       - name: Build official NIST reference adapter
         run: |
-          mvn --batch-mode --file tools/cpe-ri/pom.xml package dependency:build-classpath -Dmdep.outputFile=target/classpath.txt
+          mvn --batch-mode --file tools/cpe-ri/pom.xml package dependency:build-classpath -Dmdep.outputFile=$GITHUB_WORKSPACE/tools/cpe-ri/target/classpath.txt
 
       - name: Compare CPE relations against NIST
         run: |
