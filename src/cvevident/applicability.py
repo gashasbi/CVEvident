@@ -411,8 +411,10 @@ def evaluate_nvd_configurations(raw_cve: dict[str, Any] | None, environment_cpes
     configurations = (raw_cve or {}).get("configurations")
     if not isinstance(configurations, list) or not configurations:
         return {
-            "status": "unknown",            "result": "nvd_configurations_unavailable",
-            "environment_cpes": supplied,            "matched_conditions": [],
+            "status": "unknown",
+            "result": "nvd_configurations_unavailable",
+            "environment_cpes": supplied,
+            "matched_conditions": [],
             "interpretation": "The local CVE record does not contain an evaluable NVD configuration tree.",
         }
     matches: list[dict[str, Any]] = []
