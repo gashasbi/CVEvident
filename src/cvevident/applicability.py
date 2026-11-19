@@ -46,13 +46,67 @@ def _decode(value: str) -> str:
     return re.sub(r"\\(.)", r"\1", value)
 
 
+_CPE_UNRESERVED = set(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._"
+)
+_CPE_PUNCTUATION = set("!\"#$%&'()+,/:;<=>@[]^") | {chr(96), "{", "|", "}", "~"}
+_CPE_QUOTED = _CPE_PUNCTUATION | {"\\", "*", "?"}
+_LANGUAGE_TAG = re.compile(r"^(?:[A-Za-z]{2,3}(?:-(?:[A-Za-z]{2}|[0-9]{3}))?|[*-])$")
+
+
+def _consume_special(value: str, index: int) -> int:
+    """Skip one CPE wildcard group at the start or end of a component."""
+    if index < len(value) and value[index] == "*":
+        return index + 1
+    while index < len(value) and value[index] == "?":
+        index += 1
+    return index
+
+
+def _valid_cpe_component(value: str) -> bool:
+    """Check the simple CPE 2.3 formatted-string component syntax."""
+    if value in {"*", "-"}:
+        return True
+    if not value or not value.isascii():
+        return False
+
+    index = _consume_special(value, 0)
+    body_start = index
+    while index < len(value):
+        char = value[index]
+        if char == "\\":
+            if index + 1 >= len(value) or value[index + 1] not in _CPE_QUOTED:
+                return False
+            index += 2
+        elif char in _CPE_UNRESERVED:
+            index += 1
+        else:
+            break
+
+    if index == body_start:
+        return False
+
+    return _consume_special(value, index) == len(value)
+
+
 def parse_cpe23(value: str) -> dict[str, str] | None:
-    if not isinstance(value, str):
+    """Parse a well-formed CPE 2.3 formatted string, or return None."""
+    if not isinstance(value, str) or not value.startswith("cpe:2.3:"):
         return None
-    parts = _split_cpe(value.strip())
+
+    parts = _split_cpe(value)
     if len(parts) != 13 or parts[:2] != ["cpe", "2.3"]:
         return None
-    return dict(zip(_FIELDS, parts[2:]))
+
+    components = parts[2:]
+    if any(not _valid_cpe_component(component) for component in components):
+        return None
+    if components[0] not in {"a", "o", "h", "*", "-"}:
+        return None
+    if not _LANGUAGE_TAG.fullmatch(components[6]):
+        return None
+
+    return dict(zip(_FIELDS, components))
 
 
 def _compare_versions(left: str, right: str) -> int | None:
@@ -68,10 +122,24 @@ def _compare_versions(left: str, right: str) -> int | None:
     return (left_parts > right_parts) - (left_parts < right_parts)
 
 
+def _has_unescaped_wildcard(value: str) -> bool:
+    index = 0
+    while index < len(value):
+        if value[index] == "\\":
+            index += 2
+        elif value[index] in {"*", "?"}:
+            return True
+        else:
+            index += 1
+    return False
+
+
 def _field_matches(criteria: str, target: str) -> bool | None:
     if criteria == "*":
         return True
     if target == "*":
+        return None
+    if _has_unescaped_wildcard(criteria) or _has_unescaped_wildcard(target):
         return None
     return unicodedata.normalize("NFKC", _decode(criteria)).casefold() == (
         unicodedata.normalize("NFKC", _decode(target)).casefold()
@@ -103,8 +171,12 @@ def _version_matches(criteria: dict[str, str], match: dict[str, Any], target: di
             }[operator]
             if not inside:
                 return False
-        if criteria_version not in {"*", "-"} and not _field_matches(criteria_version, target["version"]):
-            return False
+        if criteria_version not in {"*", "-"}:
+            version_match = _field_matches(criteria_version, target["version"])
+            if version_match is None:
+                return None
+            if not version_match:
+                return False
         return True
     return _field_matches(criteria_version, target["version"])
 
@@ -117,7 +189,10 @@ def _match_cpe(criteria_text: str, match: dict[str, Any], target_text: str) -> t
     for field in _FIELDS:
         if field == "version":
             continue
-        if not _field_matches(criteria[field], target[field]):
+        field_match = _field_matches(criteria[field], target[field])
+        if field_match is None:
+            return None, {"status": "unknown", "reason": "unsupported_cpe_wildcard"}
+        if not field_match:
             return False, {"status": "not_matched", "field": field}
     version_result = _version_matches(criteria, match, target)
     if version_result is None:
