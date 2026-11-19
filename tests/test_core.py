@@ -395,6 +395,13 @@ class DatabaseAndImportTests(TempProject):
         self.assertEqual(matches[0]["match_type"], "exact_sha256")
         self.assertEqual(matches[0]["cve_links"][0]["cve_id"], "CVE-2099-12345")
 
+    def test_reference_sample_lookup_handles_database_without_schema(self):
+        empty_db = self.root / "empty.sqlite3"
+
+        matches = lookup_reference_samples("c" * 64, empty_db)
+
+        self.assertEqual(matches, [])
+
     def test_reference_sample_invalid_hash_rejected(self):
         path = self.write_json("samples.json", {"samples": [{
             "sample_id": "bad", "sha256": "not-a-hash", "file_type": "pdf", "label": "unknown",
