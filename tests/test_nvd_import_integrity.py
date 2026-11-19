@@ -68,5 +68,45 @@ class NVDImportIntegrityTests(unittest.TestCase):
         self.assertEqual(status, "partial")
 
 
+    def test_null_operator_or_negate_preserves_previous_product_rows(self):
+        valid = [{
+            "nodes": [{
+                "operator": "OR",
+                "cpeMatch": [{"criteria": CPE, "vulnerable": True}],
+            }]
+        }]
+        self.write_feed(valid)
+        import_nvd_json(self.feed_path, self.db_path)
+        self.assertEqual(self.product_count(), 1)
+
+        malformed = [{
+            "nodes": [{
+                "operator": None,
+                "negate": False,
+                "cpeMatch": [{"criteria": CPE, "vulnerable": True}],
+            }]
+        }]
+        self.write_feed(malformed)
+        import_nvd_json(self.feed_path, self.db_path)
+        self.assertEqual(self.product_count(), 1)
+
+        malformed = [{
+            "nodes": [{
+                "operator": "OR",
+                "negate": None,
+                "cpeMatch": [{"criteria": CPE, "vulnerable": True}],
+            }]
+        }]
+        self.write_feed(malformed)
+        import_nvd_json(self.feed_path, self.db_path)
+        self.assertEqual(self.product_count(), 1)
+        with connect(self.db_path) as conn:
+            status = conn.execute(
+                "SELECT status FROM source_sync WHERE source='NVD'"
+            ).fetchone()[0]
+        self.assertEqual(status, "partial")
+
+
+
 if __name__ == "__main__":
     unittest.main()
