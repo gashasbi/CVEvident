@@ -397,23 +397,39 @@ class ProductMatchingTests(unittest.TestCase):
 
 
     def test_environment_retrieval_includes_non_vulnerable_platform_cpe_rows(self):
-        payload = self.nvd_payload(
-            cve_id="CVE-2099-12347", vendor="microsoft", product="windows_10",
-            criteria_version="10", vulnerable=False,
-        )
+        application_cpe = "cpe:2.3:a:acme:reader:2.4:*:*:*:*:*:*:*"
+        platform_cpe = "cpe:2.3:o:microsoft:windows_10:10:*:*:*:*:*:*:*"
+        payload = {"vulnerabilities": [{
+            "cve": {
+                "id": "CVE-2099-12347",
+                "published": "2099-01-01T00:00:00.000Z",
+                "lastModified": "2099-01-02T00:00:00.000Z",
+                "descriptions": [{"lang": "en", "value": "Synthetic platform-context test"}],
+                "configurations": [{
+                    "nodes": [{
+                        "operator": "AND",
+                        "cpeMatch": [
+                            {"criteria": application_cpe, "vulnerable": True},
+                            {"criteria": platform_cpe, "vulnerable": False},
+                        ],
+                    }],
+                }],
+            },
+        }]}
         self.import_payload("platform-only.json", payload)
-        context = build_environment_context(
-            ["cpe:2.3:o:microsoft:windows_10:10:*:*:*:*:*:*:*"],
-            str(self.db),
-            limit=1,
-        )
+        platform_only = build_environment_context([platform_cpe], str(self.db), limit=1)
         self.assertEqual(
-            [item["cve_id"] for item in context["candidate_cves"]],
+            [item["cve_id"] for item in platform_only["candidate_cves"]],
             ["CVE-2099-12347"],
         )
-        candidate = context["candidate_cves"][0]
+        candidate = platform_only["candidate_cves"][0]
         self.assertFalse(candidate["retrieval_candidates"][0]["cpe_vulnerable"])
-        self.assertIn(candidate["applicability"]["status"], {"unknown", "not_applicable"})
+        self.assertEqual(candidate["applicability"]["status"], "not_applicable")
+
+        full_environment = build_environment_context(
+            [application_cpe, platform_cpe], str(self.db), limit=1,
+        )
+        self.assertEqual(full_environment["candidate_cves"][0]["applicability"]["status"], "applicable")
 
     def test_product_retrieval_reports_candidate_truncation(self):
         payload = {"vulnerabilities": []}
