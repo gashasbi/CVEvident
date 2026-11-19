@@ -271,7 +271,9 @@ def _valid_nvd_configuration_node(node: Any) -> bool:
     if not isinstance(node, dict):
         return False
     operator = node.get("operator")
-    if operator is not None and operator not in {"AND", "OR"}:
+    if operator is not None and (
+        not isinstance(operator, str) or operator.upper() not in {"AND", "OR"}
+    ):
         return False
     negate = node.get("negate")
     if negate is not None and not isinstance(negate, bool):
