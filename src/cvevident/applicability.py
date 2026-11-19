@@ -197,7 +197,9 @@ def _version_matches(criteria: dict[str, str], match: dict[str, Any], target: di
                 "ge": comparison >= 0,
                 "gt": comparison > 0,
                 "le": comparison <= 0,
-                "lt": comparison < 0,            }[operator]            if not inside:
+                "lt": comparison < 0,
+            }[operator]
+            if not inside:
                 return False
         return True
     if target["version"] == "*" and criteria_version != "*":
