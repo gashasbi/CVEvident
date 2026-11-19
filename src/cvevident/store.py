@@ -1269,7 +1269,16 @@ def get_analysis(analysis_id: int, db_path: str | Path | None = None) -> dict[st
         row = conn.execute("SELECT * FROM analysis_runs WHERE id=?", (analysis_id,)).fetchone()
         if not row:
             return None
-        report = json.loads(row["summary_json"])
+        try:
+            report = json.loads(row["summary_json"])
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ValueError(
+                f"Stored analysis {analysis_id} has invalid summary JSON"
+            ) from exc
+        if not isinstance(report, dict):
+            raise ValueError(
+                f"Stored analysis {analysis_id} summary must be a JSON object"
+            )
         report["analysis_id"] = row["id"]
         report["created_at"] = row["created_at"]
         report["evidence"] = []
@@ -1284,7 +1293,17 @@ def get_analysis(analysis_id: int, db_path: str | Path | None = None) -> dict[st
                 item["value"] = json.loads(raw_value)
             except (TypeError, json.JSONDecodeError):
                 item["value"] = raw_value
-            item["details"] = json.loads(item.pop("details_json"))
+            try:
+                details = json.loads(item.pop("details_json"))
+            except (TypeError, json.JSONDecodeError) as exc:
+                raise ValueError(
+                    f"Stored evidence details for analysis {analysis_id} are not valid JSON"
+                ) from exc
+            if not isinstance(details, dict):
+                raise ValueError(
+                    f"Stored evidence details for analysis {analysis_id} must be a JSON object"
+                )
+            item["details"] = details
             # Rehydrate report-level provenance after loading normalized evidence rows.
             # Traceability is already present in details_json, so the schema stays unchanged.
             traceability = item["details"].get("traceability")
