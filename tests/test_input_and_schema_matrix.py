@@ -126,6 +126,28 @@ def test_doctor_reports_missing_schema_objects_without_repairing_database(
     assert table is None
 
 
+
+def test_doctor_reports_a_misdefined_index_without_repairing_database(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    db_path = init_db(tmp_path / "misdefined-index.sqlite3")
+    with connect(db_path) as conn:
+        conn.execute("DROP INDEX idx_analysis_sha256")
+        conn.execute("CREATE INDEX idx_analysis_sha256 ON analysis_runs(filename)")
+
+    exit_code = cli.main(["--db", str(db_path), "doctor"])
+
+    assert exit_code == 1
+    result = json.loads(capsys.readouterr().out)
+    assert result["healthy"] is False
+    assert "idx_analysis_sha256" in result["invalid_indexes"]
+
+    with connect(db_path) as conn:
+        columns = [
+            row[2] for row in conn.execute("PRAGMA index_info(idx_analysis_sha256)")
+        ]
+    assert columns == ["filename"]
+
 def test_doctor_does_not_create_a_missing_database(tmp_path: Path) -> None:
     missing_db = tmp_path / "missing.sqlite3"
 
