@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 import json
 import tempfile
@@ -8,6 +9,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from cvevident.analyzer import analyze_file
 from cvevident.cli import build_parser, main
 from cvevident.db import connect, init_db
 from cvevident.evidence_engine import build_cve_associations, build_environment_context, build_product_context
@@ -22,6 +24,7 @@ from cvevident.store import (
     import_epss_csv,
     import_kev_json,
     import_nvd_json,
+    import_reference_samples_json,
     search_product_cves,
 )
 
@@ -425,6 +428,47 @@ class ProductMatchingTests(unittest.TestCase):
         self.assertTrue(results[0]["retrieval_truncated"])
         self.assertEqual(results[0]["candidate_count_before_limit"], 3)
         self.assertEqual(results[0]["retrieval_limit"], 2)
+
+
+    def test_exact_sha256_sample_metadata_can_seed_product_context(self):
+        self.import_payload(
+            "sample-product-nvd.json",
+            self.nvd_payload(
+                vendor="acme", product="reader", criteria_version="2.4",
+                end_including=None,
+            ),
+        )
+        sample_path = self.root / "sample.rtf"
+        sample_bytes = br"{\rtf1\ansi Curated sample}"
+        sample_path.write_bytes(sample_bytes)
+        digest = hashlib.sha256(sample_bytes).hexdigest()
+        samples = {
+            "samples": [{
+                "sample_id": "CURATED-READER-001",
+                "sha256": digest,
+                "file_type": "rtf",
+                "label": "unknown",
+                "source_name": "Synthetic curated inventory",
+                "label_basis": "Operator reviewed product metadata",
+                "product_name": "Acme Reader",
+                "product_version": "2.4",
+            }]
+        }
+        self.assertEqual(
+            import_reference_samples_json(self.write_json("sample-metadata.json", samples), self.db),
+            1,
+        )
+        report = analyze_file(sample_path, self.db)
+        self.assertEqual(
+            report["product_identity_discovery"]["status"],
+            "exact_sha256_curated_reference_sample",
+        )
+        self.assertEqual(report["target_context"]["target_product"], "Acme Reader")
+        self.assertEqual(report["target_context"]["target_version"], "2.4")
+        self.assertEqual(
+            report["target_context"]["candidate_cves"][0]["cve_id"],
+            "CVE-2099-12345",
+        )
 
 
 if __name__ == "__main__":
