@@ -19,7 +19,7 @@ CASES = (
     (cpe(version="9.*"), cpe(version="9.3.2")),
     (cpe(vendor="?cme"), cpe(vendor="acme")),
     (cpe(vendor="??cme"), cpe(vendor="abacme")),
-    (cpe(vendor=r"acme\\:tools*"), cpe(vendor=r"acme\\:tools-pro")),
+    (cpe(vendor=r"acme\:tools*"), cpe(vendor=r"acme\:tools-pro")),
     (cpe(vendor="acme"), cpe(vendor="acme*")),
     (cpe(vendor="*"), cpe(vendor="-")),
     (cpe(vendor="-"), cpe(vendor="*")),
