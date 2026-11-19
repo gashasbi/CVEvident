@@ -189,6 +189,7 @@ class ApplicabilityTests(unittest.TestCase):
         cases = [
             ("acme*", "acme"),
             ("acme*", "acme-tools"),
+            ("ACME*", "acme-tools"),
             ("*reader", "document-reader"),
             ("?cme", "acme"),
             ("acme?", "acme"),
