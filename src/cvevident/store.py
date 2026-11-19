@@ -267,6 +267,54 @@ def _iter_nvd_items(source_path: Path) -> Iterable[dict[str, Any]]:
         raise ValueError(f"Could not stream NVD JSON from {source_path}: {exc}") from exc
 
 
+def _valid_nvd_configuration_node(node: Any) -> bool:
+    if not isinstance(node, dict):
+        return False
+    operator = node.get("operator")
+    if operator is not None and operator not in {"AND", "OR"}:
+        return False
+    negate = node.get("negate")
+    if negate is not None and not isinstance(negate, bool):
+        return False
+
+    if "cpeMatch" in node:
+        cpe_matches = node["cpeMatch"]
+        if not isinstance(cpe_matches, list):
+            return False
+        for match in cpe_matches:
+            if not isinstance(match, dict):
+                return False
+            criteria = match.get("criteria") or match.get("cpe23Uri")
+            if not isinstance(criteria, str) or not criteria.strip():
+                return False
+            if "vulnerable" in match and not isinstance(match["vulnerable"], bool):
+                return False
+            for key in (
+                "versionStartIncluding",
+                "versionStartExcluding",
+                "versionEndIncluding",
+                "versionEndExcluding",
+            ):
+                if match.get(key) is not None and not isinstance(match[key], str):
+                    return False
+
+    child_field = "nodes" if "nodes" in node else "children" if "children" in node else None
+    if child_field is not None:
+        children = node[child_field]
+        if not isinstance(children, list):
+            return False
+        if not all(_valid_nvd_configuration_node(child) for child in children):
+            return False
+    return "cpeMatch" in node or child_field is not None
+
+
+def _valid_nvd_configurations(configurations: Any) -> bool:
+    return (
+        isinstance(configurations, list)
+        and all(_valid_nvd_configuration_node(item) for item in configurations)
+    )
+
+
 def import_nvd_json(
     path: str | Path, db_path: str | Path | None = None,
     progress_callback: Callable[[int, int | None], None] | None = None,
@@ -284,6 +332,7 @@ def import_nvd_json(
         raise FileNotFoundError(message)
     count = 0
     skipped_invalid_records = 0
+    skipped_invalid_configurations = 0
     try:
         with connect(db_path) as conn:
             for record_index, item in enumerate(_iter_nvd_items(source_path), start=1):
@@ -325,30 +374,34 @@ def import_nvd_json(
                                 "INSERT OR IGNORE INTO vulnerability_weaknesses(cve_id,cwe_id,description) VALUES(?,?,?)",
                                 (cve_id, weakness_id, ""),
                             )
-                # An explicit configurations property means this record's product list is authoritative.
+                # Replace product rows only when the supplied configuration tree is well formed.
                 if "configurations" in cve:
-                    conn.execute("DELETE FROM affected_products WHERE cve_id=?", (cve_id,))
-                    for product_row in _extract_products(item):
-                        conn.execute(
-                            """INSERT OR IGNORE INTO affected_products
-                               (cve_id,criteria,vendor,product,version_start_including,version_start_excluding,
-                                version_end_including,version_end_excluding,vulnerable)
-                               VALUES(?,?,?,?,?,?,?,?,?)""",
-                            (cve_id, product_row["criteria"], product_row["vendor"], product_row["product"],
-                             product_row["version_start_including"], product_row["version_start_excluding"],
-                             product_row["version_end_including"], product_row["version_end_excluding"],
-                             int(product_row["vulnerable"])),
-                        )
+                    if not _valid_nvd_configurations(cve["configurations"]):
+                        skipped_invalid_configurations += 1
+                    else:
+                        conn.execute("DELETE FROM affected_products WHERE cve_id=?", (cve_id,))
+                        for product_row in _extract_products(item):
+                            conn.execute(
+                                """INSERT OR IGNORE INTO affected_products
+                                   (cve_id,criteria,vendor,product,version_start_including,version_start_excluding,
+                                    version_end_including,version_end_excluding,vulnerable)
+                                   VALUES(?,?,?,?,?,?,?,?,?)""",
+                                (cve_id, product_row["criteria"], product_row["vendor"], product_row["product"],
+                                 product_row["version_start_including"], product_row["version_start_excluding"],
+                                 product_row["version_end_including"], product_row["version_end_excluding"],
+                                 int(product_row["vulnerable"])),
+                            )
                 count += 1
                 if progress_callback is not None:
                     progress_callback(count, progress_total)
             details = (
                 f"Imported {source_path.name}; valid_records={count}; "
-                f"skipped_invalid_records={skipped_invalid_records}"
+                f"skipped_invalid_records={skipped_invalid_records}; "
+                f"skipped_invalid_configurations={skipped_invalid_configurations}"
             )
             _update_source_sync(
                 conn, "NVD", count, details,
-                status="partial" if skipped_invalid_records else "success",
+                status="partial" if skipped_invalid_records or skipped_invalid_configurations else "success",
             )
     except (OSError, json.JSONDecodeError, EOFError, gzip.BadGzipFile, zlib.error) as exc:
         message = f"Could not read NVD JSON from {source_path}: {exc}"
