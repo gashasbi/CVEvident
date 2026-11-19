@@ -273,6 +273,16 @@ def _match_cpe(
             "attribute_relations": relations,
         }
     if relation == "subset":
+        if any(
+            target[field] == "*" and criteria[field] != "*"
+            for field in _FIELDS
+        ):
+            return None, {
+                "status": "unknown",
+                "reason": "incomplete_environment_cpe",
+                "name_relation": relation,
+                "attribute_relations": relations,
+            }
         return False, {
             "status": "not_matched",
             "reason": "criteria_is_narrower_than_environment",
