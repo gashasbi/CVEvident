@@ -255,5 +255,23 @@ class ApplicabilityTests(unittest.TestCase):
         )
 
 
+    def test_wildcard_target_attributes_are_undefined(self):
+        cases = [
+            ("acme*", "acme*"),
+            ("*", "acme*"),
+        ]
+        for source_vendor, target_vendor in cases:
+            with self.subTest(source=source_vendor, target=target_vendor):
+                criteria = f"cpe:2.3:a:{source_vendor}:reader:2.4:*:*:*:*:*:*:*"
+                target = f"cpe:2.3:a:{target_vendor}:reader:2.4:*:*:*:*:*:*:*"
+                cve = {"configurations": [{"nodes": [{"cpeMatch": [{
+                    "criteria": criteria, "vulnerable": True,
+                }]}]}]}
+                self.assertEqual(
+                    evaluate_nvd_configurations(cve, [target])["status"],
+                    "unknown",
+                )
+
+
 if __name__ == "__main__":
     unittest.main()
