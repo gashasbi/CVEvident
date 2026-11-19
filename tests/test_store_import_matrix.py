@@ -7,9 +7,11 @@ from pathlib import Path
 
 import pytest
 
+from cvevident import cli
 from cvevident.db import connect, init_db
 from cvevident.store import (
     get_analysis,
+    get_cve,
     import_epss_csv,
     import_kev_json,
     import_nvd_json,
@@ -92,6 +94,54 @@ def test_source_importers_fail_explicitly_for_missing_files(
         importer(tmp_path / filename, tmp_path / "db.sqlite3")
 
 
+
+def test_kev_import_preserves_catalog_snapshot_metadata(tmp_path: Path) -> None:
+    db_path = init_db(tmp_path / "kev-metadata.sqlite3")
+    path = _write_json(tmp_path / "kev.json", {
+        "catalogVersion": "2026.11.19",
+        "dateReleased": "2026-11-19T00:00:00.000Z",
+        "count": 1,
+        "vulnerabilities": [{
+            "cveID": "CVE-2024-1234",
+            "vendorProject": "Example Vendor",
+            "product": "Example Product",
+            "vulnerabilityName": "Example issue",
+            "dateAdded": "2026-11-19",
+            "shortDescription": "Synthetic fixture",
+            "requiredAction": "Update",
+            "dueDate": "2026-12-01",
+        }],
+    })
+
+    assert import_kev_json(path, db_path) == 1
+
+    with connect(db_path) as conn:
+        source = conn.execute(
+            "SELECT details FROM source_sync WHERE source='CISA KEV'"
+        ).fetchone()
+    assert "catalog_version=2026.11.19" in source["details"]
+    assert "date_released=2026-11-19T00:00:00.000Z" in source["details"]
+    assert "catalog_count=1" in source["details"]
+
+
+def test_kev_import_marks_catalog_count_mismatch_as_partial(tmp_path: Path) -> None:
+    db_path = init_db(tmp_path / "kev-count-mismatch.sqlite3")
+    path = _write_json(tmp_path / "kev-mismatch.json", {
+        "catalogVersion": "2026.11.19",
+        "dateReleased": "2026-11-19T00:00:00.000Z",
+        "count": 2,
+        "vulnerabilities": [{"cveID": "CVE-2024-1234"}],
+    })
+
+    assert import_kev_json(path, db_path) == 1
+
+    with connect(db_path) as conn:
+        source = conn.execute(
+            "SELECT status,details FROM source_sync WHERE source='CISA KEV'"
+        ).fetchone()
+    assert source["status"] == "partial"
+    assert "catalog_count_mismatch=declared:2,actual:1" in source["details"]
+
 def test_kev_import_skips_invalid_rows_and_only_records_http_notes(tmp_path: Path) -> None:
     db_path = init_db(tmp_path / "kev.sqlite3")
     payload = {
@@ -116,6 +166,44 @@ def test_kev_import_skips_invalid_rows_and_only_records_http_notes(tmp_path: Pat
     assert [row["url"] for row in refs] == ["https://example.test/kev"]
 
 
+def test_kev_catalog_metadata_is_available_from_cve_details_and_cli(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    db_path = init_db(tmp_path / "kev-details.sqlite3")
+    kev_record = {
+        "cveID": "CVE-2024-1234",
+        "vendorProject": "Example Vendor",
+        "product": "Example Product",
+        "vulnerabilityName": "Example remote code execution",
+        "dateAdded": "2024-01-10",
+        "shortDescription": "Example vulnerability description",
+        "requiredAction": "Apply the vendor update.",
+        "dueDate": "2024-02-10",
+        "knownRansomwareCampaignUse": "Known",
+        "notes": "https://example.test/kev-notes",
+        "cwes": ["CWE-79"],
+    }
+    path = _write_json(tmp_path / "kev-details.json", {"vulnerabilities": [kev_record]})
+
+    assert import_kev_json(path, db_path) == 1
+
+    details = get_cve("CVE-2024-1234", db_path)
+    assert details is not None
+    kev_observations = [
+        item for item in details["source_observations"]
+        if item["source_name"] == "CISA KEV"
+    ]
+    assert len(kev_observations) == 1
+    assert kev_observations[0]["source_record"] == kev_record
+
+    assert cli.main(["--db", str(db_path), "show-cve", "CVE-2024-1234"]) == 0
+    shown = json.loads(capsys.readouterr().out)
+    assert "raw_json" not in shown
+    assert shown["source_observations"][0]["source_record"]["requiredAction"] == (
+        "Apply the vendor update."
+    )
+
+
 def test_epss_import_skips_bad_ids_numbers_and_out_of_range_values(tmp_path: Path) -> None:
     db_path = init_db(tmp_path / "epss.sqlite3")
     path = tmp_path / "scores.csv"
@@ -133,6 +221,49 @@ def test_epss_import_skips_bad_ids_numbers_and_out_of_range_values(tmp_path: Pat
         rows = conn.execute("SELECT cve_id,epss_score,epss_percentile FROM vulnerabilities").fetchall()
     assert [tuple(row) for row in rows] == [("CVE-2024-1003", 0.2, 0.8)]
 
+
+
+def test_epss_import_preserves_official_model_and_score_date_metadata(tmp_path: Path) -> None:
+    db_path = init_db(tmp_path / "epss-metadata.sqlite3")
+    path = tmp_path / "scores.csv"
+    path.write_text(
+        "#model_version:v2026.06.15,score_date:2026-11-19T00:00:00Z\n"
+        "cve,epss,percentile\n"
+        "CVE-2024-1003,0.2,0.8\n",
+        encoding="utf-8",
+    )
+
+    assert import_epss_csv(path, db_path) == 1
+
+    with connect(db_path) as conn:
+        source = conn.execute(
+            "SELECT status,details FROM source_sync WHERE source='FIRST EPSS'"
+        ).fetchone()
+    assert source["status"] == "success"
+    assert "model_version=v2026.06.15" in source["details"]
+    assert "score_date=2026-11-19T00:00:00Z" in source["details"]
+
+
+def test_epss_gzip_import_preserves_model_and_score_date_metadata(tmp_path: Path) -> None:
+    import gzip
+
+    db_path = init_db(tmp_path / "epss-gzip.sqlite3")
+    path = tmp_path / "scores.csv.gz"
+    with gzip.open(path, "wt", encoding="utf-8", newline="") as handle:
+        handle.write(
+            "#model_version:v2026.06.15,score_date:2026-11-19T00:00:00Z\n"
+            "cve,epss,percentile\n"
+            "CVE-2024-1003,0.2,0.8\n"
+        )
+
+    assert import_epss_csv(path, db_path) == 1
+
+    with connect(db_path) as conn:
+        details = conn.execute(
+            "SELECT details FROM source_sync WHERE source='FIRST EPSS'"
+        ).fetchone()["details"]
+    assert "model_version=v2026.06.15" in details
+    assert "score_date=2026-11-19T00:00:00Z" in details
 
 def test_reference_sample_import_skips_non_object_samples_and_non_object_links(tmp_path: Path) -> None:
     db_path = init_db(tmp_path / "samples.sqlite3")

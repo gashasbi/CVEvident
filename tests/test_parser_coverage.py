@@ -191,3 +191,50 @@ def test_finalized_report_and_markdown_include_normalized_parser_coverage():
     assert "Parser coverage" in html_rendered
     assert "external_reference_inventory" in html_rendered
     assert encoded["analysis_coverage"]["parser_coverage"] == coverage
+
+
+
+def test_legacy_zero_stream_reads_have_consistent_incomplete_coverage():
+    report = {
+        "file": {
+            "filename": "legacy.doc",
+            "file_type": "doc",
+            "size_bytes": 128,
+            "sha256": "b" * 64,
+        },
+        "legacy_office_analysis": {
+            "status": "parsed",
+            "directory_entry_count": 4,
+            "stream_count": 1,
+            "stream_read_count": 0,
+            "features": {"vba_project_present": True},
+            "warnings": [],
+        },
+        "scope": {"implemented": ["bounded CFB directory inspection"], "not_implemented": []},
+        "warnings": [],
+        "evidence": [],
+        "target_context": {},
+    }
+
+    finalize_evidence_traceability(report)
+
+    analysis_coverage = report["analysis_coverage"]
+    parser_coverage = analysis_coverage["parser_coverage"]
+    assert parser_coverage["domains"]["content_inspection"]["status"] == "not_inspected"
+    assert parser_coverage["overall_status"] == "partial"
+    assert analysis_coverage["complete_for_declared_static_scope"] is False
+
+    encoded = json.loads(serialize_json(report))
+    assert encoded["analysis_coverage"]["complete_for_declared_static_scope"] is False
+    assert encoded["analysis_coverage"]["parser_coverage"]["overall_status"] == "partial"
+
+    markdown = to_markdown(report)
+    html_report = to_html(report)
+    assert "overall coverage:" in markdown
+    assert "partial" in markdown
+    assert "content_inspection" in markdown
+    assert "not_inspected" in markdown
+    assert "overall coverage" in html_report
+    assert "partial" in html_report
+    assert "content_inspection" in html_report
+    assert "not_inspected" in html_report

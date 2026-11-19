@@ -7,11 +7,11 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
-from .db import connect
+from .db import connect, init_db
 from .evidence_engine import build_cve_associations, build_environment_context, build_product_context, evidence_summary
 from .correlation import correlate_evidence_rules
 from .evidence_trace import append_product_context_evidence, append_reported_source_evidence, finalize_evidence_traceability
-from .file_input import read_prefix
+from .file_input import get_file_identity, read_prefix_with_identity
 from .pdf_triage import analyze_pdf
 from .office_triage import LEGACY_OFFICE_EXTENSIONS, OFFICE_EXTENSIONS, analyze_office
 from .legacy_office_triage import OLE_SIGNATURE, analyze_legacy_office
@@ -29,12 +29,14 @@ def analyze_file(path: str | Path, db_path: str | Path | None = None,
                  candidate_limit: int = 10, target_vendor: str | None = None,
                  target_version: str | None = None,
                  environment_cpes: list[str] | None = None) -> dict[str, Any]:
+    init_db(db_path)
     input_path = Path(path).expanduser()
     suffix = input_path.suffix.lower()
     try:
-        prefix = read_prefix(input_path, 1024)
+        prefix, input_identity = read_prefix_with_identity(input_path, 1024)
     except OSError:
         prefix = b""
+        input_identity = None
 
     # Select a parser using content signatures first and suffixes only as a fallback.
     # Every format-specific parser remains static and bounded; none executes content.
@@ -78,6 +80,17 @@ def analyze_file(path: str | Path, db_path: str | Path | None = None,
         # Preserve the previous behavior for unknown/non-document inputs. The PDF
         # analyzer will identify them as unknown_or_non_pdf and keeps legacy CLI stable.
         report = analyze_pdf(input_path, max_bytes=max_bytes)
+
+    if input_identity is None:
+        raise RuntimeError("Input file identity could not be verified; analysis was stopped.")
+    try:
+        current_identity = get_file_identity(input_path)
+    except OSError as exc:
+        raise RuntimeError(
+            "Input file changed or became unavailable during analysis; no report was produced."
+        ) from exc
+    if current_identity != input_identity:
+        raise RuntimeError("Input file changed during analysis; no report was produced.")
 
     report["tool_version"] = __version__
     report["created_at"] = _now()

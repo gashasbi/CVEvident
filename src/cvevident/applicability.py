@@ -46,13 +46,67 @@ def _decode(value: str) -> str:
     return re.sub(r"\\(.)", r"\1", value)
 
 
+_CPE_UNRESERVED = set(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._"
+)
+_CPE_PUNCTUATION = set("!\"#$%&'()+,/:;<=>@[]^") | {chr(96), "{", "|", "}", "~"}
+_CPE_QUOTED = _CPE_PUNCTUATION | {"\\", "*", "?"}
+_LANGUAGE_TAG = re.compile(r"^(?:[A-Za-z]{2,3}(?:-(?:[A-Za-z]{2}|[0-9]{3}))?|[*-])$")
+
+
+def _consume_special(value: str, index: int) -> int:
+    """Skip one CPE wildcard group at the start or end of a component."""
+    if index < len(value) and value[index] == "*":
+        return index + 1
+    while index < len(value) and value[index] == "?":
+        index += 1
+    return index
+
+
+def _valid_cpe_component(value: str) -> bool:
+    """Check the simple CPE 2.3 formatted-string component syntax."""
+    if value in {"*", "-"}:
+        return True
+    if not value or not value.isascii():
+        return False
+
+    index = _consume_special(value, 0)
+    body_start = index
+    while index < len(value):
+        char = value[index]
+        if char == "\\":
+            if index + 1 >= len(value) or value[index + 1] not in _CPE_QUOTED:
+                return False
+            index += 2
+        elif char in _CPE_UNRESERVED:
+            index += 1
+        else:
+            break
+
+    if index == body_start:
+        return False
+
+    return _consume_special(value, index) == len(value)
+
+
 def parse_cpe23(value: str) -> dict[str, str] | None:
-    if not isinstance(value, str):
+    """Parse a well-formed CPE 2.3 formatted string, or return None."""
+    if not isinstance(value, str) or not value.startswith("cpe:2.3:"):
         return None
-    parts = _split_cpe(value.strip())
+
+    parts = _split_cpe(value)
     if len(parts) != 13 or parts[:2] != ["cpe", "2.3"]:
         return None
-    return dict(zip(_FIELDS, parts[2:]))
+
+    components = parts[2:]
+    if any(not _valid_cpe_component(component) for component in components):
+        return None
+    if components[0] not in {"a", "o", "h", "*", "-"}:
+        return None
+    if not _LANGUAGE_TAG.fullmatch(components[6]):
+        return None
+
+    return dict(zip(_FIELDS, components))
 
 
 def _compare_versions(left: str, right: str) -> int | None:
@@ -68,14 +122,56 @@ def _compare_versions(left: str, right: str) -> int | None:
     return (left_parts > right_parts) - (left_parts < right_parts)
 
 
-def _field_matches(criteria: str, target: str) -> bool | None:
-    if criteria == "*":
-        return True
-    if target == "*":
+def _has_unescaped_wildcard(value: str) -> bool:
+    index = 0
+    while index < len(value):
+        if value[index] == "\\":
+            index += 2
+        elif value[index] in {"*", "?"}:
+            return True
+        else:
+            index += 1
+    return False
+
+
+def _wildcard_matches(pattern: str, value: str) -> bool:
+    """Match a CPE source value against one concrete target value."""
+    pattern = unicodedata.normalize("NFKC", pattern).casefold()
+    expression: list[str] = []
+    index = 0
+    while index < len(pattern):
+        char = pattern[index]
+        if char == "\\":
+            index += 1
+            expression.append(re.escape(pattern[index]))
+        elif char == "*":
+            expression.append(".*")
+        elif char == "?":
+            expression.append(".?")
+        else:
+            expression.append(re.escape(char))
+        index += 1
+    normalized = unicodedata.normalize("NFKC", value).casefold()
+    return re.fullmatch("".join(expression), normalized, flags=re.DOTALL) is not None
+
+
+def _attribute_relation(source: str, target: str) -> str | None:
+    """Return the NIST CPE 2.3 relation from source attribute to target."""
+    if target != "*" and _has_unescaped_wildcard(target):
         return None
-    return unicodedata.normalize("NFKC", _decode(criteria)).casefold() == (
-        unicodedata.normalize("NFKC", _decode(target)).casefold()
-    )
+    if source == target:
+        return "equal"
+    if source == "*":
+        return "superset"
+    if target == "*":
+        return "subset"
+    if source == "-" or target == "-":
+        return "disjoint"
+    if _has_unescaped_wildcard(source):
+        return "superset" if _wildcard_matches(source, _decode(target)) else "disjoint"
+    source_value = unicodedata.normalize("NFKC", _decode(source)).casefold()
+    target_value = unicodedata.normalize("NFKC", _decode(target)).casefold()
+    return "equal" if source_value == target_value else "disjoint"
 
 
 def _version_matches(criteria: dict[str, str], match: dict[str, Any], target: dict[str, str]) -> bool | None:
@@ -91,6 +187,8 @@ def _version_matches(criteria: dict[str, str], match: dict[str, Any], target: di
     )
     declared = [(key, operator, match.get(key)) for key, operator in bounds if match.get(key) not in (None, "")]
     if declared:
+        if criteria_version != "*" or criteria["update"] != "*":
+            return None
         for _, operator, boundary in declared:
             comparison = _compare_versions(target_version, str(boundary))
             if comparison is None:
@@ -103,32 +201,122 @@ def _version_matches(criteria: dict[str, str], match: dict[str, Any], target: di
             }[operator]
             if not inside:
                 return False
-        if criteria_version not in {"*", "-"} and not _field_matches(criteria_version, target["version"]):
-            return False
         return True
-    return _field_matches(criteria_version, target["version"])
+    if target["version"] == "*" and criteria_version != "*":
+        return None
+    relation = _attribute_relation(criteria_version, target["version"])
+    if relation is None:
+        return None
+    return relation in {"equal", "superset"}
 
 
-def _match_cpe(criteria_text: str, match: dict[str, Any], target_text: str) -> tuple[bool | None, dict[str, Any]]:
+def compare_cpe23(source_text: str, target_text: str) -> dict[str, Any]:
+    """Compare two CPE 2.3 names using the NISTIR 7696 set relations."""
+    source = parse_cpe23(source_text)
+    target = parse_cpe23(target_text)
+    if source is None or target is None:
+        return {
+            "relation": "undefined",
+            "reason": "invalid_cpe_2_3",
+            "attribute_relations": {},
+        }
+
+    relations = {
+        field: _attribute_relation(source[field], target[field])
+        for field in _FIELDS
+    }
+    values = list(relations.values())
+    if "disjoint" in values:
+        relation = "disjoint"
+    elif None in values:
+        relation = "undefined"
+    elif all(value == "equal" for value in values):
+        relation = "equal"
+    elif all(value in {"subset", "equal"} for value in values):
+        relation = "subset"
+    elif all(value in {"superset", "equal"} for value in values):
+        relation = "superset"
+    else:
+        relation = "undefined"
+    reported_relations = {
+        field: value if value is not None else "undefined"
+        for field, value in relations.items()
+    }
+
+    return {
+        "relation": relation,
+        "attribute_relations": reported_relations,
+    }
+
+
+def _match_cpe(
+    criteria_text: str, match: dict[str, Any], target_text: str
+) -> tuple[bool | None, dict[str, Any]]:
     criteria = parse_cpe23(criteria_text)
     target = parse_cpe23(target_text)
     if criteria is None or target is None:
         return None, {"status": "unknown", "reason": "invalid_cpe_2_3"}
-    for field in _FIELDS:
-        if field == "version":
-            continue
-        if not _field_matches(criteria[field], target[field]):
-            return False, {"status": "not_matched", "field": field}
+
+    comparison = compare_cpe23(criteria_text, target_text)
+    relation = comparison["relation"]
+    relations = comparison["attribute_relations"]
+    if relation == "disjoint":
+        field = next(
+            name for name, value in relations.items() if value == "disjoint"
+        )
+        return False, {
+            "status": "not_matched",
+            "field": field,
+            "name_relation": relation,
+            "attribute_relations": relations,
+        }
+    if relation == "undefined":
+        return None, {
+            "status": "unknown",
+            "reason": "unsupported_cpe_wildcard",
+            "name_relation": relation,
+            "attribute_relations": relations,
+        }
+    if relation == "subset":
+        if any(
+            target[field] == "*" and criteria[field] != "*"
+            for field in _FIELDS
+        ):
+            return None, {
+                "status": "unknown",
+                "reason": "incomplete_environment_cpe",
+                "name_relation": relation,
+                "attribute_relations": relations,
+            }
+        return False, {
+            "status": "not_matched",
+            "reason": "criteria_is_narrower_than_environment",
+            "name_relation": relation,
+            "attribute_relations": relations,
+        }
+
     version_result = _version_matches(criteria, match, target)
     if version_result is None:
-        return None, {"status": "unknown", "reason": "unsupported_version_range"}
+        return None, {
+            "status": "unknown",
+            "reason": "unsupported_version_range",
+            "name_relation": relation,
+            "attribute_relations": relations,
+        }
     if not version_result:
-        return False, {"status": "not_matched", "field": "version"}
+        return False, {
+            "status": "not_matched",
+            "field": "version",
+            "name_relation": relation,
+            "attribute_relations": relations,
+        }
     return True, {
         "status": "matched",
         "criteria": criteria_text,
         "environment_cpe": target_text,
         "vulnerable": bool(match.get("vulnerable", False)),
+        "name_relation": relation,
+        "attribute_relations": relations,
     }
 
 

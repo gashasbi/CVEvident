@@ -379,6 +379,21 @@ def import_kev_json(path: str | Path, db_path: str | Path | None = None) -> int:
         message = "Expected CISA KEV JSON with a 'vulnerabilities' array"
         _record_source_import_failure(db_path, "CISA KEV", message)
         raise ValueError(message)
+    catalog_metadata: dict[str, str] = {}
+    if isinstance(payload, dict):
+        for source_key, detail_key in (
+            ("catalogVersion", "catalog_version"),
+            ("dateReleased", "date_released"),
+        ):
+            value = payload.get(source_key)
+            if isinstance(value, str) and value.strip():
+                catalog_metadata[detail_key] = value.strip()[:100]
+    catalog_count = payload.get("count") if isinstance(payload, dict) else None
+    catalog_count_mismatch = (
+        type(catalog_count) is int and catalog_count >= 0 and catalog_count != len(rows)
+    )
+    if type(catalog_count) is int and catalog_count >= 0:
+        catalog_metadata["catalog_count"] = str(catalog_count)
     validated_rows: list[tuple[dict[str, Any], str]] = []
     skipped_invalid_rows = 0
     for record_index, row in enumerate(rows, start=1):
@@ -412,9 +427,16 @@ def import_kev_json(path: str | Path, db_path: str | Path | None = None) -> int:
                 f"Imported {source_path.name}; valid_rows={count}; "
                 f"skipped_invalid_rows={skipped_invalid_rows}"
             )
+            if catalog_metadata:
+                metadata_details = "; ".join(
+                    f"{key}={value}" for key, value in sorted(catalog_metadata.items())
+                )
+                details += f"; {metadata_details}"
+            if catalog_count_mismatch:
+                details += f"; catalog_count_mismatch=declared:{catalog_count},actual:{len(rows)}"
             _update_source_sync(
                 conn, "CISA KEV", count, details,
-                status="partial" if skipped_invalid_rows else "success",
+                status="partial" if skipped_invalid_rows or catalog_count_mismatch else "success",
             )
     except Exception as exc:
         _record_source_import_failure(db_path, "CISA KEV", str(exc))
@@ -445,8 +467,25 @@ def import_epss_csv(path: str | Path, db_path: str | Path | None = None) -> int:
     skipped_invalid_rows = 0
     try:
         with _open_maybe_gzip(source_path) as handle, connect(db_path) as conn:
-            data_lines = (line for line in handle if line.strip() and not line.lstrip().startswith("#"))
-            reader = csv.DictReader(data_lines)
+            epss_metadata: dict[str, str] = {}
+
+            def data_lines():
+                for line in handle:
+                    stripped = line.strip()
+                    if not stripped:
+                        continue
+                    if stripped.startswith("#"):
+                        for item in stripped[1:].split(","):
+                            if ":" not in item:
+                                continue
+                            key, value = item.split(":", 1)
+                            key = key.strip().lower()
+                            if key in {"model_version", "score_date"} and value.strip():
+                                epss_metadata[key] = value.strip()[:100]
+                        continue
+                    yield line
+
+            reader = csv.DictReader(data_lines())
             required = {"cve", "epss", "percentile"}
             if not reader.fieldnames or not required.issubset({x.strip().lower() for x in reader.fieldnames}):
                 raise ValueError("Expected FIRST EPSS CSV columns: cve, epss, percentile")
@@ -475,6 +514,11 @@ def import_epss_csv(path: str | Path, db_path: str | Path | None = None) -> int:
                 )
                 count += 1
             details = f"Imported {source_path.name}; valid_rows={count}; skipped_invalid_rows={skipped_invalid_rows}"
+            if epss_metadata:
+                metadata_details = "; ".join(
+                    f"{key}={value}" for key, value in sorted(epss_metadata.items())
+                )
+                details += f"; {metadata_details}"
             _update_source_sync(
                 conn, "FIRST EPSS", count, details,
                 status="partial" if skipped_invalid_rows else "success",
@@ -932,6 +976,18 @@ def get_cve(cve_id: str, db_path: str | Path | None = None) -> dict[str, Any] | 
             "version_end_including,version_end_excluding,vulnerable FROM affected_products WHERE cve_id=? ORDER BY vendor,product",
             (cve_id,),
         ).fetchall()]
+        result["source_observations"] = []
+        for observation in conn.execute(
+            "SELECT source_name,observed_at,source_updated_at,source_record_json "
+            "FROM source_observations WHERE cve_id=? ORDER BY source_name,id",
+            (cve_id,),
+        ):
+            item = dict(observation)
+            try:
+                item["source_record"] = json.loads(item.pop("source_record_json"))
+            except (TypeError, json.JSONDecodeError):
+                item["source_record"] = None
+            result["source_observations"].append(item)
         return result
 
 
@@ -1102,6 +1158,12 @@ def lookup_reference_samples(sha256: str, db_path: str | Path | None = None) -> 
     if not re.fullmatch(r"[0-9a-f]{64}", normalized):
         raise ValueError("sha256 must contain exactly 64 hexadecimal characters")
     with connect(db_path) as conn:
+        table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='reference_samples'"
+        ).fetchone()
+        if table is None:
+            return []
+
         rows = conn.execute("SELECT * FROM reference_samples WHERE sha256=?", (normalized,)).fetchall()
         result: list[dict[str, Any]] = []
         for row in rows:

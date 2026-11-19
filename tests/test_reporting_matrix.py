@@ -1,7 +1,7 @@
 """Cross-section Markdown report acceptance for optional static-analysis evidence."""
 from __future__ import annotations
 
-from cvevident.reporting import to_markdown
+from cvevident.reporting import to_html, to_markdown
 
 
 def _base_report() -> dict:
@@ -210,3 +210,19 @@ def test_markdown_renders_odf_rtf_and_legacy_office_sections_with_bounded_exampl
     assert "entry-99\\|unsafe" in legacy
     assert "entry-100\\|unsafe" not in legacy
     assert "directory was partial" in legacy
+
+
+
+def test_html_renders_numbered_evidence_list():
+    report = _base_report()
+    report["evidence"] = [
+        {"key": "first_indicator", "value": 1, "severity": "info", "details": {}},
+        {"key": "second_indicator", "value": 2, "severity": "info", "details": {}},
+    ]
+
+    rendered = to_html(report)
+
+    assert "<ol>" in rendered
+    assert "<li>" in rendered
+    assert "first_indicator" in rendered
+    assert "second_indicator" in rendered

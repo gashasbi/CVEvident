@@ -9,6 +9,7 @@ CVEvident is intended for evidence-led static triage of suspicious documents. St
 - **Local database:** analysis results and imported CVE context are persisted in SQLite on the local machine.
 - **Explicit synchronization:** network connections to NVD, CISA KEV, or FIRST EPSS occur when the corresponding synchronization command is run, not as part of ordinary file analysis.
 - **Bounded work:** input size, parser traversal, archive entry counts, XML reads, object counts, and displayed examples are capped.
+- **Input consistency:** format detection records the opened file identity. The identity is checked again after parsing, and analysis stops if the file was replaced, modified, or became unavailable during the run.
 
 ## Default resource boundaries
 

@@ -747,11 +747,8 @@ def finalize_evidence_traceability(report: dict[str, Any]) -> None:
         if status_reason not in limitation_reasons:
             limitation_reasons.append(status_reason)
 
-    coverage_complete = (
-        format_recognized
-        and parser_status == "parsed"
-        and not truncated
-    )
+    parser_coverage = build_parser_coverage(report, section_name, parser_report)
+    coverage_complete = parser_coverage["overall_status"] == "complete"
     feature_assessments = _feature_assessments(report)
     report["analysis_coverage"] = {
         "schema_version": 1,
@@ -768,7 +765,7 @@ def finalize_evidence_traceability(report: dict[str, Any]) -> None:
         "absence_of_findings_means": _ABSENCE_CAVEAT,
         "interpretation": "Coverage status describes the declared static inspection only; it is not a safety determination.",
         "feature_assessments": feature_assessments,
-        "parser_coverage": build_parser_coverage(report, section_name, parser_report),
+        "parser_coverage": parser_coverage,
     }
 
     # The normal Markdown/HTML report already renders warnings. Add concise coverage

@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from cvevident.file_input import read_file
+from cvevident.file_input import get_file_identity, read_file, read_prefix_with_identity
 
 
 class SharedFileInputTests(unittest.TestCase):
@@ -27,6 +27,16 @@ class SharedFileInputTests(unittest.TestCase):
         self.assertEqual(result.data, payload)
         self.assertEqual(result.size_bytes, len(payload))
         self.assertEqual(result.sha256, hashlib.sha256(payload).hexdigest())
+
+    def test_prefix_read_returns_the_opened_file_identity(self):
+        path = self.root / "sample.bin"
+        payload = b"static sample bytes"
+        path.write_bytes(payload)
+
+        prefix, identity = read_prefix_with_identity(path, size=6)
+
+        self.assertEqual(prefix, payload[:6])
+        self.assertEqual(identity, get_file_identity(path))
 
     def test_rejects_input_over_size_limit(self):
         path = self.root / "large.bin"

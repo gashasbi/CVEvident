@@ -703,7 +703,8 @@ def to_html(report: dict[str, Any]) -> str:
         elif re.match(r"^\d+\. ", line):
             if list_kind != "ol":
                 close_list(); rendered.append("<ol>"); list_kind = "ol"
-            rendered.append(f"<li>{inline(re.sub(r'^\d+\. ', '', line))}</li>")
+            item_text = re.sub(r"^\d+\. ", "", line)
+            rendered.append(f"<li>{inline(item_text)}</li>")
         elif line.startswith("> "):
             close_list(); rendered.append(f"<blockquote>{inline(line[2:])}</blockquote>")
         elif line.strip() == "---":

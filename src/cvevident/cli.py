@@ -10,7 +10,7 @@ from typing import Any
 
 from . import __version__
 from .analyzer import analyze_file
-from .db import SCHEMA_VERSION, connect, default_db_path, init_db
+from .db import SCHEMA, SCHEMA_VERSION, connect, default_db_path, init_db
 from .reporting import serialize_json, to_html, to_markdown
 from .product_matching import normalize_product_text, split_product_version
 from .progress import progress
@@ -140,18 +140,129 @@ def _render(report: dict[str, Any], fmt: str) -> str:
     return serialize_json(report)
 
 
+def _index_definitions(conn: sqlite3.Connection) -> dict[str, tuple[str, bool, tuple[str | None, ...]]]:
+    """Return named index table, uniqueness, and ordered columns."""
+    definitions: dict[str, tuple[str, bool, tuple[str | None, ...]]] = {}
+    rows = conn.execute(
+        "SELECT name, tbl_name FROM sqlite_master WHERE type='index' "
+        "AND name NOT LIKE 'sqlite_autoindex_%'"
+    )
+    for name, table in rows:
+        quoted_table = '"' + table.replace('"', '""') + '"'
+        quoted_name = '"' + name.replace('"', '""') + '"'
+        index_list = conn.execute(f"PRAGMA index_list({quoted_table})")
+        unique = any(row[1] == name and bool(row[2]) for row in index_list)
+        columns = tuple(row[2] for row in conn.execute(f"PRAGMA index_info({quoted_name})"))
+        definitions[name] = (table, unique, columns)
+    return definitions
+
+
+def _expected_schema() -> tuple[
+    set[str], dict[str, set[str]], dict[str, tuple[str, bool, tuple[str | None, ...]]]
+]:
+    expected = sqlite3.connect(":memory:")
+    expected.executescript(SCHEMA)
+
+    tables = {
+        row[0] for row in expected.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+        )
+    }
+    columns = {
+        table: {row[1] for row in expected.execute(f"PRAGMA table_info({table})")}
+        for table in tables
+    }
+    indexes = _index_definitions(expected)
+    expected.close()
+    return tables, columns, indexes
+
+
 def _doctor(db_path: str) -> dict[str, Any]:
+    path = Path(db_path).expanduser()
     result: dict[str, Any] = {
         "program_version": __version__,
         "schema_expected": SCHEMA_VERSION,
-        "database": str(Path(db_path).expanduser().resolve()),
+        "database": str(path.resolve()),
+        "database_exists": path.is_file(),
+        "sqlite_version": sqlite3.sqlite_version,
     }
-    with connect(db_path) as conn:
-        result["sqlite_version"] = sqlite3.sqlite_version
+    if not path.is_file():
+        result.update({
+            "integrity_check": "not_run",
+            "schema_actual": None,
+            "missing_tables": [],
+            "missing_columns": {},
+            "missing_indexes": [],
+            "invalid_indexes": [],
+            "foreign_key_violations": [],
+            "healthy": False,
+            "error": "Database file does not exist.",
+        })
+        return result
+
+    expected_tables, expected_columns, expected_indexes = _expected_schema()
+    with connect(path) as conn:
         result["integrity_check"] = conn.execute("PRAGMA integrity_check").fetchone()[0]
-        row = conn.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()
-        result["schema_actual"] = int(row[0]) if row else None
-        result["healthy"] = result["integrity_check"] == "ok" and result["schema_actual"] == SCHEMA_VERSION
+        foreign_key_violations = [
+            {
+                "table": row[0],
+                "rowid": row[1],
+                "parent_table": row[2],
+                "foreign_key_id": row[3],
+            }
+            for row in conn.execute("PRAGMA foreign_key_check")
+        ]
+
+        actual_tables = {
+            row[0] for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            )
+        }
+        missing_tables = sorted(expected_tables - actual_tables)
+        actual_columns = {
+            table: {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+            for table in expected_tables & actual_tables
+        }
+        missing_columns = {
+            table: sorted(expected_columns[table] - actual_columns[table])
+            for table in sorted(expected_tables & actual_tables)
+            if expected_columns[table] - actual_columns[table]
+        }
+        actual_indexes = _index_definitions(conn)
+        missing_indexes = sorted(set(expected_indexes) - set(actual_indexes))
+        invalid_indexes = sorted(
+            name for name in set(expected_indexes) & set(actual_indexes)
+            if expected_indexes[name] != actual_indexes[name]
+        )
+
+        schema_actual = None
+        if {"key", "value"}.issubset(actual_columns.get("schema_meta", set())):
+            row = conn.execute(
+                "SELECT value FROM schema_meta WHERE key='schema_version'"
+            ).fetchone()
+            if row:
+                try:
+                    schema_actual = int(row[0])
+                except (TypeError, ValueError):
+                    pass
+
+    result.update({
+        "schema_actual": schema_actual,
+        "missing_tables": missing_tables,
+        "missing_columns": missing_columns,
+        "missing_indexes": missing_indexes,
+        "invalid_indexes": invalid_indexes,
+        "foreign_key_violations": foreign_key_violations,
+    })
+    result["healthy"] = (
+        result["integrity_check"] == "ok"
+        and schema_actual == SCHEMA_VERSION
+        and not missing_tables
+        and not missing_columns
+        and not missing_indexes
+        and not invalid_indexes
+        and not foreign_key_violations
+    )
     return result
 
 
@@ -405,15 +516,17 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        if args.command == "doctor":
+            db_path = Path(args.db).expanduser() if args.db else default_db_path()
+            result = _doctor(str(db_path))
+            _dump(result)
+            return 0 if result["healthy"] else 1
+
         db_path = init_db(args.db)
         if args.command == "init-db":
             _dump({"status": "ok", "database": str(db_path), "schema_version": SCHEMA_VERSION, "version": __version__})
         elif args.command == "stats":
             _dump(get_stats(db_path))
-        elif args.command == "doctor":
-            result = _doctor(str(db_path))
-            _dump(result)
-            return 0 if result["healthy"] else 1
         elif args.command == "import-nvd":
             with progress("Importing NVD records"):
                 imported = import_nvd_json(args.json_file, db_path)

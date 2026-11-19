@@ -395,6 +395,26 @@ class DatabaseAndImportTests(TempProject):
         self.assertEqual(matches[0]["match_type"], "exact_sha256")
         self.assertEqual(matches[0]["cve_links"][0]["cve_id"], "CVE-2099-12345")
 
+    def test_analyze_file_initializes_an_empty_database(self):
+        pdf = self.root / "fresh-database.pdf"
+        pdf.write_bytes(b"%PDF-1.7\n%%EOF")
+        empty_db = self.root / "fresh.sqlite3"
+
+        report = analyze_file(pdf, empty_db)
+
+        self.assertEqual(report["file"]["file_type"], "pdf")
+        with connect(empty_db) as conn:
+            self.assertIsNotNone(
+                conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='source_sync'").fetchone()
+            )
+
+    def test_reference_sample_lookup_handles_database_without_schema(self):
+        empty_db = self.root / "empty.sqlite3"
+
+        matches = lookup_reference_samples("c" * 64, empty_db)
+
+        self.assertEqual(matches, [])
+
     def test_reference_sample_invalid_hash_rejected(self):
         path = self.write_json("samples.json", {"samples": [{
             "sample_id": "bad", "sha256": "not-a-hash", "file_type": "pdf", "label": "unknown",
