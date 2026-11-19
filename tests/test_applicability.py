@@ -318,7 +318,7 @@ class ApplicabilityTests(unittest.TestCase):
             ),
             (
                 "cpe:2.3:a:acme:reader:2.4:*:*:*:*:*:*:*",
-                "cpe:2.3:*:acme:reader:2.4:*:*:*:*:*:*:*",
+                "cpe:2.3:a:*:reader:2.4:*:*:*:*:*:*:*",
                 "subset",
             ),
             (
@@ -327,8 +327,8 @@ class ApplicabilityTests(unittest.TestCase):
                 "disjoint",
             ),
             (
-                "cpe:2.3:*:acme:reader:2.4:*:*:*:*:*:*:*",
                 "cpe:2.3:a:*:reader:2.4:*:*:*:*:*:*:*",
+                "cpe:2.3:a:acme*:reader:2.4:*:*:*:*:*:*:*",
                 "undefined",
             ),
             (
