@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import stat
 from pathlib import Path
 from types import SimpleNamespace
@@ -147,6 +148,37 @@ def test_doctor_reports_a_misdefined_index_without_repairing_database(
             row[2] for row in conn.execute("PRAGMA index_info(idx_analysis_sha256)")
         ]
     assert columns == ["filename"]
+
+
+def test_doctor_reports_foreign_key_violations_without_repairing_database(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    db_path = init_db(tmp_path / "foreign-key-violation.sqlite3")
+    raw = sqlite3.connect(db_path)
+    try:
+        raw.execute("PRAGMA foreign_keys = OFF")
+        raw.execute(
+            "INSERT INTO evidence(analysis_id, evidence_type, evidence_key, value_text) "
+            "VALUES(9999, 'test', 'orphan', 'value')"
+        )
+        raw.commit()
+    finally:
+        raw.close()
+
+    exit_code = cli.main(["--db", str(db_path), "doctor"])
+
+    assert exit_code == 1
+    result = json.loads(capsys.readouterr().out)
+    assert result["healthy"] is False
+    assert result["foreign_key_violations"] == [{
+        "table": "evidence",
+        "rowid": 1,
+        "parent_table": "analysis_runs",
+        "foreign_key_id": 0,
+    }]
+
+    with connect(db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM evidence").fetchone()[0] == 1
 
 def test_doctor_does_not_create_a_missing_database(tmp_path: Path) -> None:
     missing_db = tmp_path / "missing.sqlite3"
