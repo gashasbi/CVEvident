@@ -234,6 +234,9 @@ def _match_cpe(criteria_text: str, match: dict[str, Any], target_text: str) -> t
         return None, {"status": "unknown", "reason": "unsupported_version_range"}
     if not version_result:
         return False, {"status": "not_matched", "field": "version", "attribute_relations": relations}
+    relations["version"] = _attribute_relation(criteria["version"], target["version"])
+    if relations["version"] is None:
+        return None, {"status": "unknown", "reason": "unsupported_cpe_wildcard", "attribute_relations": relations}
     return True, {
         "status": "matched",
         "criteria": criteria_text,
