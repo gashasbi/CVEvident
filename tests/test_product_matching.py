@@ -471,5 +471,29 @@ class ProductMatchingTests(unittest.TestCase):
         )
 
 
+    def test_environment_candidate_limit_is_reported_as_partial_retrieval(self):
+        payload = {"vulnerabilities": []}
+        for suffix in range(12350, 12353):
+            payload["vulnerabilities"].extend(self.nvd_payload(
+                cve_id=f"CVE-2099-{suffix}", vendor="microsoft", product="windows_10",
+                criteria_version="10", vulnerable=False,
+            )["vulnerabilities"])
+        self.import_payload("many-platform-candidates.json", payload)
+        context = build_environment_context(
+            ["cpe:2.3:o:microsoft:windows_10:10:*:*:*:*:*:*:*"],
+            str(self.db),
+            limit=2,
+        )
+        self.assertEqual(len(context["candidate_cves"]), 2)
+        self.assertEqual(
+            context["retrieval_completeness"]["status"],
+            "partial_candidate_limit_reached",
+        )
+        self.assertEqual(
+            context["retrieval_completeness"]["truncated_environment_identities"][0]["retrieval_limit"],
+            2,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

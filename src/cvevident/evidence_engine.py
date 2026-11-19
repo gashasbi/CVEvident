@@ -174,7 +174,7 @@ def build_environment_context(
         # AND/OR context. Retrieve those rows too; the full configuration evaluator
         # below decides applicability and does not treat the row flag as a verdict.
         results = search_product_cves(
-            product, db_path=db_path, limit=200, vendor=vendor,
+            product, db_path=db_path, limit=limit, vendor=vendor,
             version=version if version not in {"*", "-"} else None,
             include_non_vulnerable=True,
         )
@@ -241,7 +241,7 @@ def build_environment_context(
         "candidate_cves": sorted(results, key=lambda item: item["cve_id"]),
         "retrieval_completeness": {
             "status": "partial_candidate_limit_reached" if retrieval_truncations else "no_truncation_observed",
-            "candidate_limit_per_environment_identity": 200,
+            "candidate_limit_per_environment_identity": max(1, min(int(limit), 200)),
             "truncated_environment_identities": retrieval_truncations,
             "interpretation": (
                 "At least one environment identity returned more than the retrieval cap; CVEs outside the retrieved candidate set were not configuration-evaluated."
