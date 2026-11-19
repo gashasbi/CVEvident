@@ -84,7 +84,7 @@ def _valid_cpe_component(value: str) -> bool:
             break
 
     if index == body_start:
-        return False
+        return bool(value) and all(char == "?" for char in value)
 
     return _consume_special(value, index) == len(value)
 
@@ -101,7 +101,7 @@ def parse_cpe23(value: str) -> dict[str, str] | None:
     components = parts[2:]
     if any(not _valid_cpe_component(component) for component in components):
         return None
-    if components[0] not in {"a", "o", "h", "*", "-"}:
+    if components[0] not in {"a", "o", "h"}:
         return None
     if not _LANGUAGE_TAG.fullmatch(components[6]):
         return None
@@ -397,10 +397,8 @@ def evaluate_nvd_configurations(raw_cve: dict[str, Any] | None, environment_cpes
     configurations = (raw_cve or {}).get("configurations")
     if not isinstance(configurations, list) or not configurations:
         return {
-            "status": "unknown",
-            "result": "nvd_configurations_unavailable",
-            "environment_cpes": supplied,
-            "matched_conditions": [],
+            "status": "unknown",            "result": "nvd_configurations_unavailable",
+            "environment_cpes": supplied,            "matched_conditions": [],
             "interpretation": "The local CVE record does not contain an evaluable NVD configuration tree.",
         }
     matches: list[dict[str, Any]] = []

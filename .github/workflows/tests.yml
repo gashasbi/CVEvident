@@ -45,6 +45,41 @@ jobs:
         run: python -m pytest -q
 
 
+  cpe-nist-differential:
+    name: NIST CPE reference differential
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+
+      - name: Install package and test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[test]"
+
+      - name: Build official NIST reference adapter
+        run: |
+          mvn --batch-mode --file tools/cpe-ri/pom.xml package dependency:build-classpath -Dmdep.outputFile=$GITHUB_WORKSPACE/tools/cpe-ri/target/classpath.txt
+
+      - name: Compare CPE relations against NIST
+        run: |
+          export CPE_NIST_RI_CLASSPATH="$GITHUB_WORKSPACE/tools/cpe-ri/target/classes:$(cat tools/cpe-ri/target/classpath.txt)"
+          python -m pytest -q tests/test_cpe_nist_differential.py
+
+
   package:
     name: Build and install package
     runs-on: ubuntu-latest
