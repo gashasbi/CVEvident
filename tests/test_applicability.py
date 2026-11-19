@@ -84,6 +84,7 @@ class ApplicabilityTests(unittest.TestCase):
         result = evaluate_nvd_configurations(cve, [self.target])
         self.assertEqual(result["status"], "applicable")
         self.assertEqual(len(result["matched_conditions"]), 1)
+        self.assertEqual(result["matched_conditions"][0]["name_relation"], "equal")
 
     def test_and_node_requires_every_condition(self):
         cve = {
@@ -271,6 +272,35 @@ class ApplicabilityTests(unittest.TestCase):
                     evaluate_nvd_configurations(cve, [target])["status"],
                     "unknown",
                 )
+
+
+    def test_version_wildcard_matches_a_concrete_target_version(self):
+        cve = {"configurations": [{"nodes": [{"cpeMatch": [{
+            "criteria": "cpe:2.3:a:acme:reader:9.*:*:*:*:*:*:*:*",
+            "vulnerable": True,
+        }]}]}]}
+        matching = "cpe:2.3:a:acme:reader:9.3.2:*:*:*:*:*:*:*"
+        different = "cpe:2.3:a:acme:reader:8.3.2:*:*:*:*:*:*:*"
+
+        result = evaluate_nvd_configurations(cve, [matching])
+        self.assertEqual(result["status"], "applicable")
+        self.assertEqual(result["matched_conditions"][0]["name_relation"], "superset")
+        self.assertEqual(
+            evaluate_nvd_configurations(cve, [different])["status"],
+            "not_applicable",
+        )
+
+    def test_cpe_literal_comparison_is_case_insensitive(self):
+        criteria = "cpe:2.3:a:Acme:Reader:2.4:*:*:*:*:*:*:*"
+        target = "cpe:2.3:a:acme:reader:2.4:*:*:*:*:*:*:*"
+        cve = {"configurations": [{"nodes": [{"cpeMatch": [{
+            "criteria": criteria, "vulnerable": True,
+        }]}]}]}
+
+        self.assertEqual(
+            evaluate_nvd_configurations(cve, [target])["status"],
+            "applicable",
+        )
 
 
 if __name__ == "__main__":
