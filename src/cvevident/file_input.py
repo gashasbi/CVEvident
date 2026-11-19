@@ -73,7 +73,32 @@ def read_file(path: str | Path, max_bytes: int = 100 * 1024 * 1024) -> FileInput
 
     return FileInput(path=file_path, data=data, sha256=hashlib.sha256(data).hexdigest())
 
-def read_prefix(path: str | Path, size: int = 1024) -> bytes:
+FileIdentity = tuple[int, int, int, int, int]
+
+
+def _identity_from_stat(info: os.stat_result) -> FileIdentity:
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
+def get_file_identity(path: str | Path) -> FileIdentity:
+    """Return the identity and change times of a regular file."""
+    file_path = Path(path).expanduser()
+    info = file_path.stat()
+    if not stat.S_ISREG(info.st_mode):
+        raise FileNotFoundError(f"Input file is not a regular file: {file_path}")
+    return _identity_from_stat(info)
+
+
+def read_prefix_with_identity(
+    path: str | Path, size: int = 1024
+) -> tuple[bytes, FileIdentity]:
+    """Read a bounded prefix and return the identity of the opened file."""
     if size < 0:
         raise ValueError("size must be non-negative")
 
@@ -102,9 +127,11 @@ def read_prefix(path: str | Path, size: int = 1024) -> bytes:
             raise FileNotFoundError(
                 f"Input file changed to a non-regular file before it could be read: {file_path}"
             )
+        identity = _identity_from_stat(opened_stat)
         with os.fdopen(descriptor, "rb") as handle:
             descriptor = None
-            return handle.read(size)
+            prefix = handle.read(size)
+        return prefix, identity
     except FileNotFoundError:
         raise
     except OSError as exc:
@@ -112,3 +139,9 @@ def read_prefix(path: str | Path, size: int = 1024) -> bytes:
     finally:
         if descriptor is not None:
             os.close(descriptor)
+
+
+def read_prefix(path: str | Path, size: int = 1024) -> bytes:
+    """Read a bounded prefix from one regular file."""
+    prefix, _ = read_prefix_with_identity(path, size)
+    return prefix

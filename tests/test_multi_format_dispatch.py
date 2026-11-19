@@ -1,11 +1,14 @@
+import os
 import struct
 import tempfile
 import unittest
+from unittest.mock import patch
 import zipfile
 from io import BytesIO
 from pathlib import Path
 
 from cvevident.analyzer import analyze_file
+from cvevident.pdf_triage import analyze_pdf as parse_pdf
 from cvevident.db import init_db
 from cvevident.reporting import to_html, to_markdown
 from cvevident.store import get_analysis
@@ -91,6 +94,20 @@ class MultiFormatDispatchTests(unittest.TestCase):
                 self.assertEqual(loaded["file"]["sha256"], report["file"]["sha256"])
                 self.assertIn(heading, to_markdown(loaded))
                 self.assertIn("CVEvident Analysis Report", to_html(loaded))
+
+    def test_analysis_stops_if_input_is_replaced_after_format_detection(self):
+        path = self.root / "changing.pdf"
+        replacement = self.root / "replacement.pdf"
+        path.write_bytes(b"%PDF-1.7\n%%EOF")
+        replacement.write_bytes(b"%PDF-1.6\n%%EOF")
+
+        def replace_before_parse(input_path, max_bytes):
+            os.replace(replacement, input_path)
+            return parse_pdf(input_path, max_bytes=max_bytes)
+
+        with patch("cvevident.analyzer.analyze_pdf", side_effect=replace_before_parse):
+            with self.assertRaisesRegex(RuntimeError, "changed during analysis"):
+                analyze_file(path, self.db)
 
     def test_zip_signature_can_override_wrong_odf_or_office_suffix(self):
         path = self.root / "misnamed.docx"
