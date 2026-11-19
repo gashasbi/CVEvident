@@ -131,6 +131,53 @@ def analyze_file(path: str | Path, db_path: str | Path | None = None,
             "not_implemented": ["complete semantic PDF validation", "arbitrary stream-content extraction", "dynamic analysis", "exploit detection", "definitive CVE attribution"],
         }
     report["reference_sample_matches"] = lookup_reference_samples(report["file"]["sha256"], db_path)
+    # A product identity may be reused automatically only when the analyzed bytes
+    # exactly match a curated reference sample that explicitly carries product metadata.
+    # Generic parser features are never promoted to product identities.
+    sample_product_identities: dict[tuple[str, str | None], list[str]] = {}
+    for sample in report["reference_sample_matches"]:
+        sample_name = sample.get("product_name")
+        if isinstance(sample_name, str) and sample_name.strip():
+            sample_version = sample.get("product_version")
+            identity = (sample_name.strip(), sample_version.strip() if isinstance(sample_version, str) and sample_version.strip() else None)
+            sample_product_identities.setdefault(identity, []).append(str(sample.get("sample_id") or ""))
+    effective_target_product = target_product
+    effective_target_version = target_version
+    if not effective_target_product and len(sample_product_identities) == 1:
+        (sample_name, sample_version), _sample_ids = next(iter(sample_product_identities.items()))
+        effective_target_product = sample_name
+        if not effective_target_version:
+            effective_target_version = sample_version
+        product_identity_discovery = {
+            "status": "exact_sha256_curated_reference_sample",
+            "product_name": sample_name,
+            "product_version": sample_version,
+            "sample_ids": sorted(sample_id for sample_id in _sample_ids if sample_id),
+            "interpretation": "Product identity was inherited from curated metadata only after an exact SHA-256 match to a registered reference sample.",
+        }
+    elif effective_target_product:
+        product_identity_discovery = {
+            "status": "operator_supplied",
+            "product_name": effective_target_product,
+            "product_version": effective_target_version,
+            "sample_ids": [],
+            "interpretation": "Product identity was supplied explicitly by the operator; lexical CVE retrieval does not prove product presence in the file.",
+        }
+    elif sample_product_identities:
+        product_identity_discovery = {
+            "status": "ambiguous_exact_sha256_sample_metadata",
+            "candidate_identities": [
+                {"product_name": name, "product_version": version, "sample_ids": sorted(sample_ids)}
+                for (name, version), sample_ids in sorted(sample_product_identities.items())
+            ],
+            "interpretation": "Exact-matching sample metadata contains multiple product identities; no automatic product query was selected.",
+        }
+    else:
+        product_identity_discovery = {
+            "status": "not_available_without_trusted_product_identifier",
+            "candidate_identities": [],
+            "interpretation": "No explicit product identity or exact-matching curated sample metadata was available. Generic parser observations are not treated as product identity.",
+        }
     for sample in report["reference_sample_matches"]:
         report["evidence"].append({
             "evidence_type": "reference_sample_match",
@@ -149,9 +196,12 @@ def analyze_file(path: str | Path, db_path: str | Path | None = None,
         })
     database_path = str(db_path) if db_path else None
     report["target_context"] = build_product_context(
-        target_product, database_path, candidate_limit,
-        target_vendor=target_vendor, target_version=target_version,
+        effective_target_product, database_path, candidate_limit,
+        target_vendor=target_vendor, target_version=effective_target_version,
     )
+    report["target_context"]["target_product_input"] = target_product
+    report["target_context"]["product_identity_discovery"] = product_identity_discovery
+    report["product_identity_discovery"] = product_identity_discovery
     append_product_context_evidence(report)
     append_reported_source_evidence(report)
     finalize_evidence_traceability(report)
@@ -196,7 +246,7 @@ def analyze_file(path: str | Path, db_path: str | Path | None = None,
             """INSERT INTO analysis_runs(filename,sha256,file_type,size_bytes,verdict,target_product,created_at,summary_json)
                VALUES(?,?,?,?,?,?,?,?)""",
             (report["file"]["filename"], report["file"]["sha256"], report["file"]["file_type"],
-             report["file"]["size_bytes"], report["assessment"]["verdict"], target_product,
+             report["file"]["size_bytes"], report["assessment"]["verdict"], effective_target_product,
              report["created_at"], json.dumps(report, ensure_ascii=False, separators=(",", ":"))),
         )
         analysis_id = int(cur.lastrowid)

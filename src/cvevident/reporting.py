@@ -363,6 +363,18 @@ def to_markdown(report: dict[str, Any]) -> str:
             context.get("interpretation", "No product-context search was performed.")
         )
     )
+    discovery = context.get("product_identity_discovery") or report.get("product_identity_discovery") or {}
+    if discovery:
+        lines.append(
+            f"Product identity discovery: `{_report_single_line(discovery.get('status', 'unknown'))}`; "
+            f"{_report_single_line(discovery.get('interpretation', ''))}"
+        )
+    retrieval = context.get("retrieval_completeness") or {}
+    if retrieval:
+        lines.append(
+            f"Product candidate retrieval: `{_report_single_line(retrieval.get('status', 'unknown'))}`; "
+            f"{_report_single_line(retrieval.get('interpretation', ''))}"
+        )
     ambiguity = context.get("product_identity_ambiguity") or {}
     if ambiguity:
         lines.append("")
@@ -387,6 +399,13 @@ def to_markdown(report: dict[str, Any]) -> str:
                 f"| `{_report_single_line(status.get('freshness_class', 'unknown'))}` "
                 f"| `{_report_single_line(status.get('last_success_at') or 'unknown')}` |"
             )
+        annual = freshness.get("NVD", {}).get("annual_feed_coverage") or {}
+        if annual:
+            imported_years = ", ".join(str(year) for year in annual.get("successfully_imported_years", [])) or "none recorded"
+            incomplete_years = ", ".join(str(year) for year in annual.get("failed_or_partial_years", [])) or "none recorded"
+            lines.append(f"NVD annual feeds successfully imported: {imported_years}.")
+            lines.append(f"NVD annual feeds failed or partial: {incomplete_years}.")
+            lines.append(_report_single_line(annual.get("interpretation", "")))
     candidates = context.get("candidate_cves", [])
     if not candidates:
         lines.append("")
@@ -571,6 +590,12 @@ def to_markdown(report: dict[str, Any]) -> str:
         lines.append("No environment CPE was supplied; platform applicability remains unknown.")
     else:
         lines.extend(f"- `{_report_single_line(value)}`" for value in environment_cpes)
+        retrieval = environment_context.get("retrieval_completeness") or {}
+        if retrieval:
+            lines.append(
+                f"Candidate retrieval: `{_report_single_line(retrieval.get('status', 'unknown'))}`; "
+                f"{_report_single_line(retrieval.get('interpretation', ''))}"
+            )
         if environment_context.get("invalid_environment_cpes"):
             lines.append("Invalid CPE values: " + ", ".join(
                 f"`{_report_single_line(value)}`" for value in environment_context["invalid_environment_cpes"]
@@ -593,10 +618,18 @@ def to_markdown(report: dict[str, Any]) -> str:
         for result in rule_results:
             lines.append(
                 f"- **{_report_single_line(result.get('cve_id'))}** — "
-                f"`{_report_single_line(result.get('status', 'UNKNOWN'))}`; "
+                f"`{_report_single_line(result.get('status', 'UNKNOWN'))}` "
+                f"(validation: `{_report_single_line(result.get('validation_status', 'not_assessed'))}`); "
                 f"{len(result.get('matched_rules', []) or [])} matched rule(s), "
                 f"{len(result.get('unmatched_rules', []) or [])} unmatched rule(s)."
             )
+            for group in result.get("rule_groups", []) or []:
+                lines.append(
+                    f"  - Rule group `{_report_single_line(group.get('group_id') or 'independent-rule')}` "
+                    f"(`{_report_single_line(group.get('operator', 'OR'))}`) — "
+                    f"`{_report_single_line(group.get('status', 'UNKNOWN'))}`; "
+                    f"{group.get('matched_rule_count', 0)}/{group.get('member_count', 0)} member(s) matched."
+                )
             for rule in result.get("matched_rules", []) or []:
                 lines.append(
                     f"  - Rule `{_report_single_line(rule.get('rule_id'))}` matched "

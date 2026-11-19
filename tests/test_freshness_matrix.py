@@ -20,6 +20,7 @@ def test_source_freshness_distinguishes_invalid_old_and_failed_latest_attempts(t
             "INSERT INTO source_sync(source,last_success_at,last_attempt_at,records_seen,status,details) VALUES(?,?,?,?,?,?)",
             [
                 ("NVD yearly 2020", old_success, old_success, 12, "success", "old yearly cache"),
+                ("NVD yearly 2021", None, failed_attempt, 0, "partial", "annual feed incomplete"),
                 ("NVD", old_success, failed_attempt, 0, "error", "refresh failed"),
                 ("CISA KEV", "not-a-timestamp", "also-invalid", 0, "error", "invalid fixture timestamp"),
                 ("FIRST EPSS", fresh_success, fresh_success, 100, "success", "fresh local import"),
@@ -29,8 +30,12 @@ def test_source_freshness_distinguishes_invalid_old_and_failed_latest_attempts(t
     result = get_source_freshness(db_path)["sources"]
     assert result["NVD"]["state"] == "last_attempt_not_successful"
     assert result["NVD"]["freshness_class"] == "stale_by_local_import_age"
-    assert result["NVD"]["sync_record_count"] == 2
+    assert result["NVD"]["sync_record_count"] == 3
     assert result["NVD"]["last_success_age_seconds"] is not None
+    annual = result["NVD"]["annual_feed_coverage"]
+    assert annual["successfully_imported_years"] == [2020]
+    assert annual["failed_or_partial_years"] == [2021]
+    assert annual["status"] == "observed_local_history_only"
     assert result["CISA KEV"]["state"] == "no_successful_local_import"
     assert result["CISA KEV"]["freshness_class"] == "unknown"
     assert result["FIRST EPSS"]["state"] == "available_from_local_import"

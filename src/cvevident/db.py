@@ -5,7 +5,7 @@ import os
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA = r"""
 PRAGMA foreign_keys = ON;
@@ -155,7 +155,9 @@ CREATE TABLE IF NOT EXISTS evidence_rules (
     confidence TEXT NOT NULL DEFAULT 'unknown' CHECK(confidence IN ('verified','high','medium','low','unknown')),
     verified INTEGER NOT NULL DEFAULT 0 CHECK(verified IN (0,1)),
     enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    group_id TEXT,
+    group_operator TEXT CHECK(group_operator IS NULL OR group_operator IN ('AND','OR'))
 );
 CREATE INDEX IF NOT EXISTS idx_evidence_rules_cve ON evidence_rules(cve_id, enabled);
 CREATE INDEX IF NOT EXISTS idx_evidence_rules_observation ON evidence_rules(parser_family, evidence_type, evidence_key, enabled);
@@ -204,6 +206,8 @@ def init_db(db_path: str | Path | None = None) -> Path:
         conn.executescript(SCHEMA)
         # Additive migrations for databases created by CVEvident 0.1.x.
         _ensure_column(conn, "source_sync", "last_attempt_at", "TEXT")
+        _ensure_column(conn, "evidence_rules", "group_id", "TEXT")
+        _ensure_column(conn, "evidence_rules", "group_operator", "TEXT")
         conn.execute(
             "INSERT INTO schema_meta(key,value) VALUES('schema_version',?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",

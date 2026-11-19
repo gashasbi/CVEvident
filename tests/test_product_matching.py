@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 import json
 import tempfile
@@ -8,9 +9,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from cvevident.analyzer import analyze_file
 from cvevident.cli import build_parser, main
 from cvevident.db import connect, init_db
-from cvevident.evidence_engine import build_cve_associations, build_product_context
+from cvevident.evidence_engine import build_cve_associations, build_environment_context, build_product_context
 from cvevident.product_matching import (
     assess_version_context,
     cpe23_components,
@@ -22,6 +24,7 @@ from cvevident.store import (
     import_epss_csv,
     import_kev_json,
     import_nvd_json,
+    import_reference_samples_json,
     search_product_cves,
 )
 
@@ -391,6 +394,121 @@ class ProductMatchingTests(unittest.TestCase):
         self.assertEqual(payload["vendor_filter"], "apache")
         self.assertEqual(payload["results"][0]["version_match_status"], "within_declared_numeric_version_bounds")
         self.assertIn("source_freshness", payload)
+
+
+    def test_environment_retrieval_includes_non_vulnerable_platform_cpe_rows(self):
+        application_cpe = "cpe:2.3:a:acme:reader:2.4:*:*:*:*:*:*:*"
+        platform_cpe = "cpe:2.3:o:microsoft:windows_10:10:*:*:*:*:*:*:*"
+        payload = {"vulnerabilities": [{
+            "cve": {
+                "id": "CVE-2099-12347",
+                "published": "2099-01-01T00:00:00.000Z",
+                "lastModified": "2099-01-02T00:00:00.000Z",
+                "descriptions": [{"lang": "en", "value": "Synthetic platform-context test"}],
+                "configurations": [{
+                    "nodes": [{
+                        "operator": "AND",
+                        "cpeMatch": [
+                            {"criteria": application_cpe, "vulnerable": True},
+                            {"criteria": platform_cpe, "vulnerable": False},
+                        ],
+                    }],
+                }],
+            },
+        }]}
+        self.import_payload("platform-only.json", payload)
+        platform_only = build_environment_context([platform_cpe], str(self.db), limit=1)
+        self.assertEqual(
+            [item["cve_id"] for item in platform_only["candidate_cves"]],
+            ["CVE-2099-12347"],
+        )
+        candidate = platform_only["candidate_cves"][0]
+        self.assertFalse(candidate["retrieval_candidates"][0]["cpe_vulnerable"])
+        self.assertEqual(candidate["applicability"]["status"], "not_applicable")
+
+        full_environment = build_environment_context(
+            [application_cpe, platform_cpe], str(self.db), limit=1,
+        )
+        self.assertEqual(full_environment["candidate_cves"][0]["applicability"]["status"], "applicable")
+
+    def test_product_retrieval_reports_candidate_truncation(self):
+        payload = {"vulnerabilities": []}
+        for suffix in range(12345, 12348):
+            payload["vulnerabilities"].extend(self.nvd_payload(
+                cve_id=f"CVE-2099-{suffix}", vendor="acme", product="reader",
+                criteria_version="*",
+            )["vulnerabilities"])
+        self.import_payload("many-candidates.json", payload)
+        results = search_product_cves("acme reader", self.db, limit=2)
+        self.assertEqual(len(results), 2)
+        self.assertTrue(results[0]["retrieval_truncated"])
+        self.assertEqual(results[0]["candidate_count_before_limit"], 3)
+        self.assertEqual(results[0]["retrieval_limit"], 2)
+
+
+    def test_exact_sha256_sample_metadata_can_seed_product_context(self):
+        self.import_payload(
+            "sample-product-nvd.json",
+            self.nvd_payload(
+                vendor="acme", product="reader", criteria_version="2.4",
+                end_including=None,
+            ),
+        )
+        sample_path = self.root / "sample.rtf"
+        sample_bytes = br"{\rtf1\ansi Curated sample}"
+        sample_path.write_bytes(sample_bytes)
+        digest = hashlib.sha256(sample_bytes).hexdigest()
+        samples = {
+            "samples": [{
+                "sample_id": "CURATED-READER-001",
+                "sha256": digest,
+                "file_type": "rtf",
+                "label": "unknown",
+                "source_name": "Synthetic curated inventory",
+                "label_basis": "Operator reviewed product metadata",
+                "product_name": "Acme Reader",
+                "product_version": "2.4",
+            }]
+        }
+        self.assertEqual(
+            import_reference_samples_json(self.write_json("sample-metadata.json", samples), self.db),
+            1,
+        )
+        report = analyze_file(sample_path, self.db)
+        self.assertEqual(
+            report["product_identity_discovery"]["status"],
+            "exact_sha256_curated_reference_sample",
+        )
+        self.assertEqual(report["target_context"]["target_product"], "Acme Reader")
+        self.assertEqual(report["target_context"]["target_version"], "2.4")
+        self.assertEqual(
+            report["target_context"]["candidate_cves"][0]["cve_id"],
+            "CVE-2099-12345",
+        )
+
+
+    def test_environment_candidate_limit_is_reported_as_partial_retrieval(self):
+        payload = {"vulnerabilities": []}
+        for suffix in range(12350, 12353):
+            payload["vulnerabilities"].extend(self.nvd_payload(
+                cve_id=f"CVE-2099-{suffix}", vendor="microsoft", product="windows_10",
+                criteria_version="10", vulnerable=False,
+            )["vulnerabilities"])
+        self.import_payload("many-platform-candidates.json", payload)
+        context = build_environment_context(
+            ["cpe:2.3:o:microsoft:windows_10:10:*:*:*:*:*:*:*"],
+            str(self.db),
+            limit=2,
+        )
+        self.assertEqual(len(context["candidate_cves"]), 2)
+        self.assertEqual(
+            context["retrieval_completeness"]["status"],
+            "partial_candidate_limit_reached",
+        )
+        self.assertEqual(
+            context["retrieval_completeness"]["truncated_environment_identities"][0]["retrieval_limit"],
+            2,
+        )
 
 
 if __name__ == "__main__":

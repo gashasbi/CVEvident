@@ -15,6 +15,49 @@ def _base_report() -> dict:
     }
 
 
+def test_markdown_surfaces_product_and_environment_retrieval_completeness() -> None:
+    report = _base_report()
+    report["target_context"] = {
+        "product_identity_discovery": {
+            "status": "exact_sha256_curated_reference_sample",
+            "interpretation": "Product identity inherited from an exact sample match.",
+        },
+        "retrieval_completeness": {
+            "status": "partial_candidate_limit_reached",
+            "interpretation": "Product candidates were truncated.",
+        },
+        "source_freshness": {"sources": {
+            "NVD": {
+                "state": "available_from_local_import",
+                "freshness_class": "fresh_by_local_import_age",
+                "last_success_at": "2026-11-19T00:00:00+00:00",
+                "annual_feed_coverage": {
+                    "successfully_imported_years": [2020, 2021],
+                    "failed_or_partial_years": [2022],
+                    "interpretation": "Observed local history only.",
+                },
+            },
+        }},
+    }
+    report["environment_context"] = {
+        "environment_cpes": ["cpe:2.3:o:microsoft:windows_10:10:*:*:*:*:*:*:*"],
+        "retrieval_completeness": {
+            "status": "partial_candidate_limit_reached",
+            "interpretation": "Environment candidates were truncated.",
+        },
+        "candidate_cves": [],
+    }
+    markdown = to_markdown(report)
+    assert "exact_sha256_curated_reference_sample" in markdown
+    assert "Product candidates were truncated" in markdown
+    assert "NVD annual feeds successfully imported: 2020, 2021" in markdown
+    assert "NVD annual feeds failed or partial: 2022" in markdown
+    assert "Environment candidates were truncated" in markdown
+    html = to_html(report)
+    assert "2020, 2021" in html
+    assert "partial_candidate_limit_reached" in html
+
+
 def test_markdown_renders_office_inventory_limits_and_product_context_branches() -> None:
     report = _base_report()
     report["office_analysis"] = {
