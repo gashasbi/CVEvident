@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from cvevident.applicability import evaluate_nvd_configurations, parse_cpe23
+from cvevident.applicability import compare_cpe23, evaluate_nvd_configurations, parse_cpe23
 
 
 class ApplicabilityTests(unittest.TestCase):
@@ -301,6 +301,44 @@ class ApplicabilityTests(unittest.TestCase):
             evaluate_nvd_configurations(cve, [target])["status"],
             "applicable",
         )
+
+
+    def test_cpe_name_comparison_returns_nist_set_relations(self):
+        cases = [
+            (
+                "cpe:2.3:a:acme:reader:2.4:*:*:*:*:*:*:*",
+                "cpe:2.3:a:acme:reader:2.4:*:*:*:*:*:*:*",
+                "equal",
+            ),
+            (
+                "cpe:2.3:a:acme*:reader:2.4:*:*:*:*:*:*:*",
+                "cpe:2.3:a:acme-tools:reader:2.4:*:*:*:*:*:*:*",
+                "superset",
+            ),
+            (
+                "cpe:2.3:a:acme:reader:2.4:*:*:*:*:*:*:*",
+                "cpe:2.3:*:acme:reader:2.4:*:*:*:*:*:*:*",
+                "subset",
+            ),
+            (
+                "cpe:2.3:a:acme:reader:2.4:*:*:*:*:*:*:*",
+                "cpe:2.3:a:other:reader:2.4:*:*:*:*:*:*:*",
+                "disjoint",
+            ),
+            (
+                "cpe:2.3:*:acme:reader:2.4:*:*:*:*:*:*:*",
+                "cpe:2.3:a:*:reader:2.4:*:*:*:*:*:*:*",
+                "undefined",
+            ),
+            (
+                "cpe:2.3:a:acme*:reader:2.4:*:*:*:*:*:*:*",
+                "cpe:2.3:a:acme*:reader:2.4:*:*:*:*:*:*:*",
+                "undefined",
+            ),
+        ]
+        for source, target, expected in cases:
+            with self.subTest(source=source, target=target):
+                self.assertEqual(compare_cpe23(source, target)["relation"], expected)
 
 
 if __name__ == "__main__":
