@@ -123,6 +123,25 @@ def test_kev_import_preserves_catalog_snapshot_metadata(tmp_path: Path) -> None:
     assert "date_released=2026-11-19T00:00:00.000Z" in source["details"]
     assert "catalog_count=1" in source["details"]
 
+
+def test_kev_import_marks_catalog_count_mismatch_as_partial(tmp_path: Path) -> None:
+    db_path = init_db(tmp_path / "kev-count-mismatch.sqlite3")
+    path = _write_json(tmp_path / "kev-mismatch.json", {
+        "catalogVersion": "2026.11.19",
+        "dateReleased": "2026-11-19T00:00:00.000Z",
+        "count": 2,
+        "vulnerabilities": [{"cveID": "CVE-2024-1234"}],
+    })
+
+    assert import_kev_json(path, db_path) == 1
+
+    with connect(db_path) as conn:
+        source = conn.execute(
+            "SELECT status,details FROM source_sync WHERE source='CISA KEV'"
+        ).fetchone()
+    assert source["status"] == "partial"
+    assert "catalog_count_mismatch=declared:2,actual:1" in source["details"]
+
 def test_kev_import_skips_invalid_rows_and_only_records_http_notes(tmp_path: Path) -> None:
     db_path = init_db(tmp_path / "kev.sqlite3")
     payload = {
