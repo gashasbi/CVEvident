@@ -716,6 +716,36 @@ def get_source_freshness(db_path: str | Path | None = None) -> dict[str, Any]:
             ],
             "limitation": "Freshness is measured from local successful import timestamps; it does not prove complete or current upstream coverage.",
         }
+    annual_rows = [
+        row for row in rows
+        if re.fullmatch(r"NVD yearly \d{4}", str(row.get("source") or ""))
+    ]
+    imported_years = sorted({
+        int(match.group(1))
+        for row in annual_rows
+        if (match := re.fullmatch(r"NVD yearly (\d{4})", str(row.get("source") or "")))
+        and parse_timestamp(row.get("last_success_at")) is not None
+    })
+    incomplete_years = sorted({
+        int(match.group(1))
+        for row in annual_rows
+        if (match := re.fullmatch(r"NVD yearly (\d{4})", str(row.get("source") or "")))
+        and (
+            parse_timestamp(row.get("last_success_at")) is None
+            or str(row.get("status") or "").lower() != "success"
+        )
+    })
+    freshness["sources"]["NVD"]["annual_feed_coverage"] = {
+        "status": "observed_local_history_only",
+        "successfully_imported_years": imported_years,
+        "failed_or_partial_years": incomplete_years,
+        "successful_annual_feed_count": len(imported_years),
+        "interpretation": (
+            "These years are evidenced by successful local annual-feed imports. This list does not claim a complete historical range, "
+            "does not infer that unlisted years are absent from all local NVD records, and does not establish upstream completeness. "
+            "The 2002 annual feed includes earlier CVE records."
+        ),
+    }
     return freshness
 
 
@@ -767,6 +797,7 @@ def search_product_cves(
     *,
     vendor: str | None = None,
     version: str | None = None,
+    include_non_vulnerable: bool = False,
 ) -> list[dict[str, Any]]:
     """Retrieve CPE product candidates with explicit name/version-context semantics.
 
@@ -811,7 +842,7 @@ def search_product_cves(
                     p.version_end_including, p.version_end_excluding
              FROM affected_products p
              JOIN vulnerabilities v ON v.cve_id=p.cve_id
-             WHERE p.vulnerable=1 AND (""" + " OR ".join(term_clauses) + ")"
+             WHERE """ + ("" if include_non_vulnerable else "p.vulnerable=1 AND ") + "(" + " OR ".join(term_clauses) + ")"
 
     row_identity_key = ("matched_vendor", "matched_product", "matched_criteria", "version_start_including",
                         "version_start_excluding", "version_end_including", "version_end_excluding")
@@ -999,14 +1030,25 @@ def search_product_cves(
     for candidate in results:
         candidate["query_ambiguity"] = ambiguity
         candidate.pop("_rank", None)
-    return sorted(results, key=lambda item: (
+    ordered_results = sorted(results, key=lambda item: (
         -match_class_rank.get(item.get("name_match_class", ""), 0),
         -version_rank.get(item.get("version_match_status", ""), 1) if target_version else 0,
         -item["product_relevance_score"],
         -int(item["cisa_kev"]),
         -(item["epss_score"] or 0.0),
         item["cve_id"],
-    ))[:safe_limit]
+    ))
+    truncated = len(ordered_results) > safe_limit
+    for candidate in ordered_results:
+        candidate["retrieval_limit"] = safe_limit
+        candidate["candidate_count_before_limit"] = len(ordered_results)
+        candidate["retrieval_truncated"] = truncated
+        candidate["retrieval_scope"] = (
+            "all NVD CPE rows matching the lexical query, including non-vulnerable platform rows"
+            if include_non_vulnerable else
+            "NVD vulnerable=true affected-product rows matching the lexical query"
+        )
+    return ordered_results[:safe_limit]
 
 
 def get_cve(cve_id: str, db_path: str | Path | None = None) -> dict[str, Any] | None:

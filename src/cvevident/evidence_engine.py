@@ -29,6 +29,15 @@ def build_product_context(
             "target_vendor": target_vendor.strip() if target_vendor else None,
             "target_version": target_version.strip() if target_version else None,
             "candidate_cves": [],
+            "retrieval_completeness": {
+                "status": "not_assessed_no_product_query",
+                "truncated": False,
+                "interpretation": "No product query was supplied; no product candidate search was performed.",
+            },
+            "product_identity_discovery": {
+                "status": "not_available_without_trusted_product_identifier",
+                "interpretation": "Static document features are not treated as proof of an installed product identity. Supply --target-product or an exact reference-sample record with curated product metadata.",
+            },
             "retrieval_method": "not_requested",
             "source_freshness": freshness,
             "product_identity_ambiguity": {
@@ -57,6 +66,26 @@ def build_product_context(
     identity_summary.setdefault("interpretation", (
         "This is a lexical identity estimate, not proof the product is present in the file."
     ))
+    first_candidate = candidates[0] if candidates else {}
+    retrieval_completeness = {
+        "status": (
+            "partial_candidate_limit_reached"
+            if first_candidate.get("retrieval_truncated") else
+            "candidates_returned_no_truncation_observed"
+            if candidates else
+            "no_candidates_returned"
+        ),
+        "candidate_count_before_limit": first_candidate.get("candidate_count_before_limit", 0),
+        "candidate_limit": first_candidate.get("retrieval_limit", max(1, min(int(limit), 200))),
+        "truncated": bool(first_candidate.get("retrieval_truncated", False)),
+        "interpretation": (
+            "The product candidate result was truncated; CVEs beyond the limit were not included."
+            if first_candidate.get("retrieval_truncated") else
+            "No candidates were returned. This is not evidence that the product or related CVEs do not exist."
+            if not candidates else
+            "No candidate truncation was observed for this local lexical query. The local NVD database may still have incomplete historical coverage."
+        ),
+    }
     return {
         "target_product": query_name,
         "target_product_input": target_product,
@@ -72,6 +101,11 @@ def build_product_context(
             if version_input_method == "explicit_option_conflicts_with_query_suffix" else None
         ),
         "candidate_cves": candidates,
+        "retrieval_completeness": retrieval_completeness,
+        "product_identity_discovery": {
+            "status": "operator_supplied_product_identity",
+            "interpretation": "Product CVE retrieval uses the explicit operator-supplied target product; parser feature names alone are not promoted to product identities.",
+        },
         "retrieval_method": "normalized_vendor_product_token_overlap_against_local_NVD_CPE_rows",
         "matching_policy": {
             "name_normalization": "Unicode NFKC, casefold, punctuation/underscore/hyphen token normalization",
@@ -109,6 +143,7 @@ def build_environment_context(
     supplied = [value.strip() for value in environment_cpes or [] if isinstance(value, str) and value.strip()]
     candidates: dict[str, dict[str, Any]] = {}
     invalid: list[str] = []
+    retrieval_truncations: list[dict[str, Any]] = []
     if len(supplied) > 25:
         return {
             "environment_cpes": supplied,
@@ -135,10 +170,21 @@ def build_environment_context(
         version = re.sub(r"\\(.)", r"\1", components["version"])
         if not product or product in {"*", "-"} or not vendor or vendor in {"*", "-"}:
             continue
+        # NVD configuration trees can require non-vulnerable platform CPEs as
+        # AND/OR context. Retrieve those rows too; the full configuration evaluator
+        # below decides applicability and does not treat the row flag as a verdict.
         results = search_product_cves(
-            product, db_path=db_path, limit=limit, vendor=vendor,
+            product, db_path=db_path, limit=200, vendor=vendor,
             version=version if version not in {"*", "-"} else None,
+            include_non_vulnerable=True,
         )
+        if results and results[0].get("retrieval_truncated"):
+            retrieval_truncations.append({
+                "vendor": vendor,
+                "product": product,
+                "candidate_count_before_limit": results[0].get("candidate_count_before_limit"),
+                "retrieval_limit": results[0].get("retrieval_limit"),
+            })
         for candidate in results:
             cve_id = str(candidate.get("cve_id") or "").upper()
             if not cve_id:
@@ -193,8 +239,18 @@ def build_environment_context(
         "environment_cpes": supplied,
         "invalid_environment_cpes": invalid,
         "candidate_cves": sorted(results, key=lambda item: item["cve_id"]),
+        "retrieval_completeness": {
+            "status": "partial_candidate_limit_reached" if retrieval_truncations else "no_truncation_observed",
+            "candidate_limit_per_environment_identity": 200,
+            "truncated_environment_identities": retrieval_truncations,
+            "interpretation": (
+                "At least one environment identity returned more than the retrieval cap; CVEs outside the retrieved candidate set were not configuration-evaluated."
+                if retrieval_truncations else
+                "No per-identity retrieval truncation was observed. This does not establish that the local NVD database contains all years or records."
+            ),
+        },
         "interpretation": (
-            "Environment CPEs were used to retrieve matching local product identities and evaluate the stored NVD configuration tree. "
+            "Environment CPEs retrieve both vulnerable=true product rows and vulnerable=false platform/context rows before evaluating the complete stored NVD configuration tree. "
             "This is environment applicability context, not proof that the analyzed document contains or triggers a vulnerable component."
         ),
     }

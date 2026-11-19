@@ -186,5 +186,28 @@ class EvidenceRuleTests(unittest.TestCase):
         import_evidence_rules_json(self.write_json("rules.json", rules), self.db)
 
 
+    def test_unverified_rule_match_is_explicitly_labelled_unverified(self):
+        self.import_rule()
+        report = {
+            "office_analysis": {"status": "parsed"},
+            "analysis_coverage": {"parser_coverage": {"domains": {
+                "active_content_indicators": {"status": "complete"}
+            }}},
+            "evidence": [{
+                "evidence_id": "EV-UNVERIFIED",
+                "evidence_type": "office_structural_feature",
+                "key": "office.structure.vba_project_present",
+                "value": True,
+            }],
+        }
+        result = correlate_evidence_rules(report, str(self.db))
+        item = result["cve_results"][0]
+        self.assertEqual(item["status"], "MATCH")
+        self.assertEqual(item["validation_status"], "unverified")
+        self.assertEqual(item["verified_match_count"], 0)
+        self.assertEqual(item["unverified_match_count"], 1)
+        self.assertIn("none is independently marked verified", item["interpretation"])
+
+
 if __name__ == "__main__":
     unittest.main()

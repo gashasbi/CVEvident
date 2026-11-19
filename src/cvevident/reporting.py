@@ -593,7 +593,8 @@ def to_markdown(report: dict[str, Any]) -> str:
         for result in rule_results:
             lines.append(
                 f"- **{_report_single_line(result.get('cve_id'))}** — "
-                f"`{_report_single_line(result.get('status', 'UNKNOWN'))}`; "
+                f"`{_report_single_line(result.get('status', 'UNKNOWN'))}` "
+                f"(validation: `{_report_single_line(result.get('validation_status', 'not_assessed'))}`); "
                 f"{len(result.get('matched_rules', []) or [])} matched rule(s), "
                 f"{len(result.get('unmatched_rules', []) or [])} unmatched rule(s)."
             )

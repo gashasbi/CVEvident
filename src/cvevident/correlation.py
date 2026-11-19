@@ -105,8 +105,26 @@ def correlate_evidence_rules(report: dict[str, Any], db_path: str | None = None)
             if coverage != "complete" and item["status"] != "MATCH":
                 item["status"] = "UNKNOWN"
     for item in by_cve.values():
+        matched = item["matched_rules"]
+        verified_matches = [rule for rule in matched if rule.get("verified") is True]
+        unverified_matches = [rule for rule in matched if rule.get("verified") is not True]
+        item["validation_status"] = (
+            "mixed_verified_and_unverified"
+            if verified_matches and unverified_matches else
+            "verified"
+            if verified_matches else
+            "unverified"
+            if matched else
+            "not_applicable"
+        )
+        item["verified_match_count"] = len(verified_matches)
+        item["unverified_match_count"] = len(unverified_matches)
         item["interpretation"] = (
-            "One or more source-backed rules matched exact parser observations. This is a documented evidence relationship, not proof of exploitability."
+            (
+                "One or more exact source-backed parser rules matched. At least one matching rule is independently marked verified; this is not proof of exploitability."
+                if verified_matches else
+                "One or more exact parser rules matched, but none is independently marked verified. Treat this as an unverified configured match, not a validated CVE relationship."
+            )
             if item["status"] == "MATCH" else
             "No configured rule matched, and parser coverage is incomplete or unavailable; absence of the observation is not established."
             if item["status"] == "UNKNOWN" else

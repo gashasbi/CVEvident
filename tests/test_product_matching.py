@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from cvevident.cli import build_parser, main
 from cvevident.db import connect, init_db
-from cvevident.evidence_engine import build_cve_associations, build_product_context
+from cvevident.evidence_engine import build_cve_associations, build_environment_context, build_product_context
 from cvevident.product_matching import (
     assess_version_context,
     cpe23_components,
@@ -391,6 +391,40 @@ class ProductMatchingTests(unittest.TestCase):
         self.assertEqual(payload["vendor_filter"], "apache")
         self.assertEqual(payload["results"][0]["version_match_status"], "within_declared_numeric_version_bounds")
         self.assertIn("source_freshness", payload)
+
+
+    def test_environment_retrieval_includes_non_vulnerable_platform_cpe_rows(self):
+        payload = self.nvd_payload(
+            cve_id="CVE-2099-12347", vendor="microsoft", product="windows_10",
+            criteria_version="10", vulnerable=False,
+        )
+        self.import_payload("platform-only.json", payload)
+        context = build_environment_context(
+            ["cpe:2.3:o:microsoft:windows_10:10:*:*:*:*:*:*:*"],
+            str(self.db),
+            limit=1,
+        )
+        self.assertEqual(
+            [item["cve_id"] for item in context["candidate_cves"]],
+            ["CVE-2099-12347"],
+        )
+        candidate = context["candidate_cves"][0]
+        self.assertFalse(candidate["retrieval_candidates"][0]["cpe_vulnerable"])
+        self.assertIn(candidate["applicability"]["status"], {"unknown", "not_applicable"})
+
+    def test_product_retrieval_reports_candidate_truncation(self):
+        payload = {"vulnerabilities": []}
+        for suffix in range(12345, 12348):
+            payload["vulnerabilities"].extend(self.nvd_payload(
+                cve_id=f"CVE-2099-{suffix}", vendor="acme", product="reader",
+                criteria_version="*",
+            )["vulnerabilities"])
+        self.import_payload("many-candidates.json", payload)
+        results = search_product_cves("acme reader", self.db, limit=2)
+        self.assertEqual(len(results), 2)
+        self.assertTrue(results[0]["retrieval_truncated"])
+        self.assertEqual(results[0]["candidate_count_before_limit"], 3)
+        self.assertEqual(results[0]["retrieval_limit"], 2)
 
 
 if __name__ == "__main__":
