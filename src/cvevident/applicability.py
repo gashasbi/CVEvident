@@ -134,16 +134,43 @@ def _has_unescaped_wildcard(value: str) -> bool:
     return False
 
 
-def _field_matches(criteria: str, target: str) -> bool | None:
-    if criteria == "*":
-        return True
+def _wildcard_matches(pattern: str, value: str) -> bool:
+    """Match a CPE source value against one concrete target value."""
+    expression: list[str] = []
+    index = 0
+    while index < len(pattern):
+        char = pattern[index]
+        if char == "\\\\":
+            index += 1
+            expression.append(re.escape(pattern[index]))
+        elif char == "*":
+            expression.append(".*")
+        elif char == "?":
+            expression.append(".?")
+        else:
+            expression.append(re.escape(char))
+        index += 1
+    normalized = unicodedata.normalize("NFKC", value).casefold()
+    return re.fullmatch("".join(expression), normalized, flags=re.DOTALL) is not None
+
+
+def _attribute_relation(source: str, target: str) -> str | None:
+    """Return the NIST CPE 2.3 relation from source attribute to target."""
+    if source == target:
+        return "equal"
+    if source == "*":
+        return "superset"
     if target == "*":
+        return "subset"
+    if source == "-" or target == "-":
+        return "disjoint"
+    if _has_unescaped_wildcard(target):
         return None
-    if _has_unescaped_wildcard(criteria) or _has_unescaped_wildcard(target):
-        return None
-    return unicodedata.normalize("NFKC", _decode(criteria)).casefold() == (
-        unicodedata.normalize("NFKC", _decode(target)).casefold()
-    )
+    if _has_unescaped_wildcard(source):
+        return "superset" if _wildcard_matches(source, _decode(target)) else "disjoint"
+    source_value = unicodedata.normalize("NFKC", _decode(source)).casefold()
+    target_value = unicodedata.normalize("NFKC", _decode(target)).casefold()
+    return "equal" if source_value == target_value else "disjoint"
 
 
 def _version_matches(criteria: dict[str, str], match: dict[str, Any], target: dict[str, str]) -> bool | None:
@@ -186,24 +213,33 @@ def _match_cpe(criteria_text: str, match: dict[str, Any], target_text: str) -> t
     target = parse_cpe23(target_text)
     if criteria is None or target is None:
         return None, {"status": "unknown", "reason": "invalid_cpe_2_3"}
+    relations: dict[str, str | None] = {}
     for field in _FIELDS:
         if field == "version":
             continue
-        field_match = _field_matches(criteria[field], target[field])
-        if field_match is None:
-            return None, {"status": "unknown", "reason": "unsupported_cpe_wildcard"}
-        if not field_match:
-            return False, {"status": "not_matched", "field": field}
+        if target[field] == "*" and criteria[field] != "*":
+            relations[field] = None
+            continue
+        relations[field] = _attribute_relation(criteria[field], target[field])
+    if any(relation == "disjoint" for relation in relations.values()):
+        field = next(name for name, relation in relations.items() if relation == "disjoint")
+        return False, {"status": "not_matched", "field": field, "attribute_relations": relations}
+    if any(relation is None for relation in relations.values()):
+        return None, {"status": "unknown", "reason": "unsupported_cpe_wildcard", "attribute_relations": relations}
+    if any(relation == "subset" for relation in relations.values()):
+        return False, {"status": "not_matched", "reason": "criteria_is_narrower_than_environment", "attribute_relations": relations}
     version_result = _version_matches(criteria, match, target)
     if version_result is None:
         return None, {"status": "unknown", "reason": "unsupported_version_range"}
     if not version_result:
-        return False, {"status": "not_matched", "field": "version"}
+        return False, {"status": "not_matched", "field": "version", "attribute_relations": relations}
     return True, {
         "status": "matched",
         "criteria": criteria_text,
         "environment_cpe": target_text,
         "vulnerable": bool(match.get("vulnerable", False)),
+        "name_relation": "superset" if "superset" in relations.values() else "equal",
+        "attribute_relations": relations,
     }
 
 
