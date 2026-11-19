@@ -1102,6 +1102,12 @@ def lookup_reference_samples(sha256: str, db_path: str | Path | None = None) -> 
     if not re.fullmatch(r"[0-9a-f]{64}", normalized):
         raise ValueError("sha256 must contain exactly 64 hexadecimal characters")
     with connect(db_path) as conn:
+        table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='reference_samples'"
+        ).fetchone()
+        if table is None:
+            return []
+
         rows = conn.execute("SELECT * FROM reference_samples WHERE sha256=?", (normalized,)).fetchall()
         result: list[dict[str, Any]] = []
         for row in rows:
