@@ -265,18 +265,16 @@ def test_epss_gzip_import_preserves_model_and_score_date_metadata(tmp_path: Path
     assert "model_version=v2026.06.15" in details
     assert "score_date=2026-11-19T00:00:00Z" in details
 
-def test_reference_sample_import_skips_non_object_samples_and_non_object_links(tmp_path: Path) -> None:
+def test_reference_sample_import_rejects_non_object_samples_atomically(tmp_path: Path) -> None:
     db_path = init_db(tmp_path / "samples.sqlite3")
     path = _write_json(tmp_path / "samples.json", {"samples": [None, "not-a-row", _sample()]})
 
-    assert import_reference_samples_json(path, db_path) == 1
+    with pytest.raises(ValueError, match="Sample 1 must be a JSON object"):
+        import_reference_samples_json(path, db_path)
+
     with connect(db_path) as conn:
-        row = conn.execute("SELECT sample_id,sha256,label FROM reference_samples").fetchone()
-        link_count = conn.execute("SELECT COUNT(*) FROM sample_vulnerability_links").fetchone()[0]
-    assert row["sample_id"] == "sample-boundary-001"
-    assert row["sha256"] == "a" * 64
-    assert row["label"] == "unknown"
-    assert link_count == 0
+        assert conn.execute("SELECT COUNT(*) FROM reference_samples").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM sample_vulnerability_links").fetchone()[0] == 0
 
 
 @pytest.mark.parametrize(
