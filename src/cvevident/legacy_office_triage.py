@@ -898,16 +898,38 @@ def analyze_legacy_office(path: str, max_bytes: int = 100 * 1024 * 1024) -> dict
 
     warnings: list[str] = []
     partial = False
+    minor_version = struct.unpack_from("<H", data, 24)[0]
     major_version = struct.unpack_from("<H", data, 26)[0]
     byte_order = struct.unpack_from("<H", data, 28)[0]
     sector_shift = struct.unpack_from("<H", data, 30)[0]
     mini_sector_shift = struct.unpack_from("<H", data, 32)[0]
+    if data[8:24] != b"\x00" * 16:
+        return _base_report(file_input, "failed", "OLE/CFB header CLSID must be zero.")
+    if data[34:40] != b"\x00" * 6:
+        return _base_report(file_input, "failed", "OLE/CFB reserved header bytes must be zero.")
     if byte_order != 0xFFFE:
         return _base_report(file_input, "failed", "OLE/CFB byte-order marker is invalid.")
     if (major_version, sector_shift) not in ((3, 9), (4, 12)):
         return _base_report(file_input, "failed", "OLE/CFB version or sector-size fields are unsupported or invalid.")
     if mini_sector_shift != 6:
         return _base_report(file_input, "failed", "OLE/CFB mini-sector shift is invalid; expected 64-byte mini sectors.")
+    if minor_version != 0x003E:
+        warnings.append(
+            f"OLE/CFB minor version is {minor_version:#06x}; expected 0x003e."
+        )
+        partial = True
+    if major_version == 3 and struct.unpack_from("<I", data, 40)[0] != 0:
+        return _base_report(
+            file_input,
+            "failed",
+            "OLE/CFB version 3 directory-sector count must be zero.",
+        )
+    if major_version == 4 and any(data[512:4096]):
+        return _base_report(
+            file_input,
+            "failed",
+            "OLE/CFB version 4 header padding bytes must be zero.",
+        )
 
     mini_stream_cutoff = struct.unpack_from("<I", data, 56)[0]
     if mini_stream_cutoff != 4096:
@@ -925,6 +947,7 @@ def analyze_legacy_office(path: str, max_bytes: int = 100 * 1024 * 1024) -> dict
     if total_sectors > _MAX_CHAIN_SECTORS:
         return _base_report(file_input, "failed", "OLE/CFB sector count exceeds the configured traversal limit.")
 
+    num_directory_sectors = struct.unpack_from("<I", data, 40)[0]
     num_fat_sectors = struct.unpack_from("<I", data, 44)[0]
     first_directory_sector = struct.unpack_from("<I", data, 48)[0]
     first_mini_fat_sector = struct.unpack_from("<I", data, 60)[0]
@@ -1001,6 +1024,17 @@ def analyze_legacy_office(path: str, max_bytes: int = 100 * 1024 * 1024) -> dict
         partial = True
         if chain_error:
             warnings.append(f"Directory chain: {chain_error}.")
+    if (
+        major_version == 4
+        and not chain_partial
+        and len(directory_bytes) % sector_size == 0
+        and len(directory_bytes) // sector_size != num_directory_sectors
+    ):
+        return _base_report(
+            file_input,
+            "failed",
+            "OLE/CFB version 4 directory-sector count does not match the directory chain.",
+        )
     if not directory_bytes:
         message = "OLE/CFB directory stream is unavailable or empty."
         report = _base_report(file_input, "failed", message)
@@ -1606,7 +1640,9 @@ def analyze_legacy_office(path: str, max_bytes: int = 100 * 1024 * 1024) -> dict
         "legacy_office_analysis": {
             "status": status, "family": family, "format_id": detected_type,
             "container_format": "OLE Compound File Binary (CFB)",
-            "major_version": major_version, "byte_order_valid": byte_order == 0xFFFE,
+            "minor_version": minor_version, "major_version": major_version,
+            "directory_sector_count_declared": num_directory_sectors,
+            "byte_order_valid": byte_order == 0xFFFE,
             "sector_size": sector_size, "mini_sector_size": 1 << mini_sector_shift if mini_sector_shift < 16 else None,
             "physical_sector_count": total_sectors, "fat_sector_count_declared": num_fat_sectors,
             "difat_sector_count_declared": num_difat_sectors,

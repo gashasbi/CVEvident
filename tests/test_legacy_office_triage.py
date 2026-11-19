@@ -1267,6 +1267,60 @@ class LegacyOfficeTests(unittest.TestCase):
                 report = self.analyze("invalid-header.doc", bytes(data))
                 self.assertEqual(report["legacy_office_analysis"]["status"], "failed")
 
+    def test_header_clsid_must_be_zero(self):
+        data = bytearray(build_cfb([("Root Entry", 5), ("WordDocument", 2)]))
+        data[8] = 1
+        report = self.analyze("header-clsid.doc", bytes(data))
+        self.assertEqual(report["legacy_office_analysis"]["status"], "failed")
+        self.assertTrue(any("header CLSID" in warning for warning in report["warnings"]))
+
+    def test_reserved_header_bytes_must_be_zero(self):
+        data = bytearray(build_cfb([("Root Entry", 5), ("WordDocument", 2)]))
+        data[34] = 1
+        report = self.analyze("reserved-header.doc", bytes(data))
+        self.assertEqual(report["legacy_office_analysis"]["status"], "failed")
+        self.assertTrue(any("reserved header bytes" in warning for warning in report["warnings"]))
+
+    def test_version_three_directory_sector_count_must_be_zero(self):
+        data = bytearray(build_cfb([("Root Entry", 5), ("WordDocument", 2)]))
+        struct.pack_into("<I", data, 40, 1)
+        report = self.analyze("version3-directory-count.doc", bytes(data))
+        self.assertEqual(report["legacy_office_analysis"]["status"], "failed")
+        self.assertTrue(any("version 3 directory-sector count" in warning for warning in report["warnings"]))
+
+    def test_version_four_directory_sector_count_must_match_chain(self):
+        data = bytearray(build_cfb_with_root_tree(
+            [("Root Entry", 5), ("WordDocument", 2)], major=4
+        ))
+        struct.pack_into("<I", data, 40, 2)
+        report = self.analyze("version4-directory-count.doc", bytes(data))
+        self.assertEqual(report["legacy_office_analysis"]["status"], "failed")
+        self.assertTrue(any("does not match the directory chain" in warning for warning in report["warnings"]))
+
+    def test_version_four_header_padding_must_be_zero(self):
+        data = bytearray(build_cfb_with_root_tree(
+            [("Root Entry", 5), ("WordDocument", 2)], major=4
+        ))
+        data[512] = 1
+        report = self.analyze("version4-padding.doc", bytes(data))
+        self.assertEqual(report["legacy_office_analysis"]["status"], "failed")
+        self.assertTrue(any("header padding" in warning for warning in report["warnings"]))
+
+    def test_unexpected_minor_version_is_reported_as_partial(self):
+        data = bytearray(build_cfb([("Root Entry", 5), ("WordDocument", 2)]))
+        struct.pack_into("<H", data, 24, 0x003D)
+        report = self.analyze("minor-version.doc", bytes(data))
+        analysis = report["legacy_office_analysis"]
+        self.assertEqual(analysis["status"], "partial")
+        self.assertEqual(analysis["minor_version"], 0x003D)
+        self.assertTrue(any("minor version" in warning for warning in analysis["warnings"]))
+
+    def test_nonzero_transaction_signature_is_not_rejected(self):
+        data = bytearray(build_cfb([("Root Entry", 5), ("WordDocument", 2)]))
+        struct.pack_into("<I", data, 52, 123)
+        report = self.analyze("transaction-signature.doc", bytes(data))
+        self.assertNotEqual(report["legacy_office_analysis"]["status"], "failed")
+
     def test_non_sector_aligned_cfb_is_reported_partial(self):
         data = build_cfb([("Root Entry", 5), ("WordDocument", 2)]) + b"\x00"
         report = self.analyze("misaligned.doc", data)
