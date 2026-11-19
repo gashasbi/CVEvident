@@ -267,6 +267,54 @@ def _iter_nvd_items(source_path: Path) -> Iterable[dict[str, Any]]:
         raise ValueError(f"Could not stream NVD JSON from {source_path}: {exc}") from exc
 
 
+def _valid_nvd_configuration_node(node: Any) -> bool:
+    if not isinstance(node, dict):
+        return False
+    if "operator" in node:
+        operator = node["operator"]
+        if not isinstance(operator, str) or operator.upper() not in {"AND", "OR"}:
+            return False
+    if "negate" in node and not isinstance(node["negate"], bool):
+        return False
+
+    if "cpeMatch" in node:
+        cpe_matches = node["cpeMatch"]
+        if not isinstance(cpe_matches, list):
+            return False
+        for match in cpe_matches:
+            if not isinstance(match, dict):
+                return False
+            criteria = match.get("criteria") or match.get("cpe23Uri")
+            if not isinstance(criteria, str) or not criteria.strip():
+                return False
+            if "vulnerable" in match and not isinstance(match["vulnerable"], bool):
+                return False
+            for key in (
+                "versionStartIncluding",
+                "versionStartExcluding",
+                "versionEndIncluding",
+                "versionEndExcluding",
+            ):
+                if match.get(key) is not None and not isinstance(match[key], str):
+                    return False
+
+    child_field = "nodes" if "nodes" in node else "children" if "children" in node else None
+    if child_field is not None:
+        children = node[child_field]
+        if not isinstance(children, list):
+            return False
+        if not all(_valid_nvd_configuration_node(child) for child in children):
+            return False
+    return "cpeMatch" in node or child_field is not None
+
+
+def _valid_nvd_configurations(configurations: Any) -> bool:
+    return (
+        isinstance(configurations, list)
+        and all(_valid_nvd_configuration_node(item) for item in configurations)
+    )
+
+
 def import_nvd_json(
     path: str | Path, db_path: str | Path | None = None,
     progress_callback: Callable[[int, int | None], None] | None = None,
@@ -284,6 +332,7 @@ def import_nvd_json(
         raise FileNotFoundError(message)
     count = 0
     skipped_invalid_records = 0
+    skipped_invalid_configurations = 0
     try:
         with connect(db_path) as conn:
             for record_index, item in enumerate(_iter_nvd_items(source_path), start=1):
@@ -325,30 +374,34 @@ def import_nvd_json(
                                 "INSERT OR IGNORE INTO vulnerability_weaknesses(cve_id,cwe_id,description) VALUES(?,?,?)",
                                 (cve_id, weakness_id, ""),
                             )
-                # An explicit configurations property means this record's product list is authoritative.
+                # Replace product rows only when the supplied configuration tree is well formed.
                 if "configurations" in cve:
-                    conn.execute("DELETE FROM affected_products WHERE cve_id=?", (cve_id,))
-                    for product_row in _extract_products(item):
-                        conn.execute(
-                            """INSERT OR IGNORE INTO affected_products
-                               (cve_id,criteria,vendor,product,version_start_including,version_start_excluding,
-                                version_end_including,version_end_excluding,vulnerable)
-                               VALUES(?,?,?,?,?,?,?,?,?)""",
-                            (cve_id, product_row["criteria"], product_row["vendor"], product_row["product"],
-                             product_row["version_start_including"], product_row["version_start_excluding"],
-                             product_row["version_end_including"], product_row["version_end_excluding"],
-                             int(product_row["vulnerable"])),
-                        )
+                    if not _valid_nvd_configurations(cve["configurations"]):
+                        skipped_invalid_configurations += 1
+                    else:
+                        conn.execute("DELETE FROM affected_products WHERE cve_id=?", (cve_id,))
+                        for product_row in _extract_products(item):
+                            conn.execute(
+                                """INSERT OR IGNORE INTO affected_products
+                                   (cve_id,criteria,vendor,product,version_start_including,version_start_excluding,
+                                    version_end_including,version_end_excluding,vulnerable)
+                                   VALUES(?,?,?,?,?,?,?,?,?)""",
+                                (cve_id, product_row["criteria"], product_row["vendor"], product_row["product"],
+                                 product_row["version_start_including"], product_row["version_start_excluding"],
+                                 product_row["version_end_including"], product_row["version_end_excluding"],
+                                 int(product_row["vulnerable"])),
+                            )
                 count += 1
                 if progress_callback is not None:
                     progress_callback(count, progress_total)
             details = (
                 f"Imported {source_path.name}; valid_records={count}; "
-                f"skipped_invalid_records={skipped_invalid_records}"
+                f"skipped_invalid_records={skipped_invalid_records}; "
+                f"skipped_invalid_configurations={skipped_invalid_configurations}"
             )
             _update_source_sync(
                 conn, "NVD", count, details,
-                status="partial" if skipped_invalid_records else "success",
+                status="partial" if skipped_invalid_records or skipped_invalid_configurations else "success",
             )
     except (OSError, json.JSONDecodeError, EOFError, gzip.BadGzipFile, zlib.error) as exc:
         message = f"Could not read NVD JSON from {source_path}: {exc}"
@@ -1099,7 +1152,7 @@ def import_reference_samples_json(path: str | Path, db_path: str | Path | None =
     with connect(db_path) as conn:
         for sample_index, sample in enumerate(samples, start=1):
             if not isinstance(sample, dict):
-                continue
+                raise ValueError(f"Sample {sample_index} must be a JSON object")
             required = ("sample_id", "sha256", "file_type", "label", "source_name", "label_basis")
             if any(not isinstance(sample.get(key), str) or not sample[key].strip() for key in required):
                 raise ValueError(f"Each sample requires non-empty string fields: {', '.join(required)}")
@@ -1130,13 +1183,20 @@ def import_reference_samples_json(path: str | Path, db_path: str | Path | None =
                 raise ValueError(f"cve_links for sample {sample['sample_id']} must be an array")
             for link_index, link in enumerate(raw_links, start=1):
                 if not isinstance(link, dict):
-                    continue
+                    raise ValueError(
+                        f"CVE link {link_index} for sample {sample['sample_id']} must be a JSON object"
+                    )
                 cve_id = str(link.get("cve_id", "")).upper()
                 if not CVE_RE.fullmatch(cve_id):
                     raise ValueError(f"Invalid CVE ID in sample {sample['sample_id']}: {cve_id}")
                 link_confidence = str(link.get("confidence", "unknown")).lower()
                 if link_confidence not in {"verified", "high", "medium", "low", "unknown"}:
                     raise ValueError(f"Unsupported confidence value in sample CVE link: {link_confidence}")
+                verified = link.get("verified", False)
+                if not isinstance(verified, bool):
+                    raise ValueError(
+                        f"verified must be a boolean for CVE link {link_index} in sample {sample['sample_id']}"
+                    )
                 if not conn.execute("SELECT 1 FROM vulnerabilities WHERE cve_id=?", (cve_id,)).fetchone():
                     raise ValueError(f"CVE {cve_id} must be imported before linking sample {sample['sample_id']}")
                 conn.execute(
@@ -1146,7 +1206,7 @@ def import_reference_samples_json(path: str | Path, db_path: str | Path | None =
                        source_url=excluded.source_url""",
                     (sample["sample_id"], cve_id, str(link.get("association_type", "reported")),
                      str(link.get("evidence_basis", "")), link_confidence,
-                     int(bool(link.get("verified", False))), link.get("source_url")),
+                     int(verified), link.get("source_url")),
                 )
             count += 1
     return count
@@ -1207,7 +1267,16 @@ def get_analysis(analysis_id: int, db_path: str | Path | None = None) -> dict[st
         row = conn.execute("SELECT * FROM analysis_runs WHERE id=?", (analysis_id,)).fetchone()
         if not row:
             return None
-        report = json.loads(row["summary_json"])
+        try:
+            report = json.loads(row["summary_json"])
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ValueError(
+                f"Stored analysis {analysis_id} has invalid summary JSON"
+            ) from exc
+        if not isinstance(report, dict):
+            raise ValueError(
+                f"Stored analysis {analysis_id} summary must be a JSON object"
+            )
         report["analysis_id"] = row["id"]
         report["created_at"] = row["created_at"]
         report["evidence"] = []
@@ -1222,7 +1291,17 @@ def get_analysis(analysis_id: int, db_path: str | Path | None = None) -> dict[st
                 item["value"] = json.loads(raw_value)
             except (TypeError, json.JSONDecodeError):
                 item["value"] = raw_value
-            item["details"] = json.loads(item.pop("details_json"))
+            try:
+                details = json.loads(item.pop("details_json"))
+            except (TypeError, json.JSONDecodeError) as exc:
+                raise ValueError(
+                    f"Stored evidence details for analysis {analysis_id} are not valid JSON"
+                ) from exc
+            if not isinstance(details, dict):
+                raise ValueError(
+                    f"Stored evidence details for analysis {analysis_id} must be a JSON object"
+                )
+            item["details"] = details
             # Rehydrate report-level provenance after loading normalized evidence rows.
             # Traceability is already present in details_json, so the schema stays unchanged.
             traceability = item["details"].get("traceability")
