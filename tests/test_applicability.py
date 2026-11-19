@@ -184,5 +184,76 @@ class ApplicabilityTests(unittest.TestCase):
         self.assertEqual(evaluate_nvd_configurations(cve, [wildcard_target])["status"], "unknown")
 
 
+    def test_source_wildcards_match_specific_target_components(self):
+        cases = [
+            ("acme*", "acme"),
+            ("acme*", "acme-tools"),
+            ("*reader", "document-reader"),
+            ("?cme", "acme"),
+            ("acme?", "acme"),
+            ("acme?", "acmex"),
+        ]
+        for pattern, target_vendor in cases:
+            with self.subTest(pattern=pattern, target=target_vendor):
+                criteria = f"cpe:2.3:a:{pattern}:reader:2.4:*:*:*:*:*:*:*"
+                target = f"cpe:2.3:a:{target_vendor}:reader:2.4:*:*:*:*:*:*:*"
+                cve = {"configurations": [{"nodes": [{"cpeMatch": [{
+                    "criteria": criteria, "vulnerable": True,
+                }]}]}]}
+                self.assertEqual(
+                    evaluate_nvd_configurations(cve, [target])["status"],
+                    "applicable",
+                )
+
+    def test_nonmatching_source_wildcard_is_not_applicable(self):
+        criteria = "cpe:2.3:a:acme*:reader:2.4:*:*:*:*:*:*:*"
+        target = "cpe:2.3:a:other:reader:2.4:*:*:*:*:*:*:*"
+        cve = {"configurations": [{"nodes": [{"cpeMatch": [{
+            "criteria": criteria, "vulnerable": True,
+        }]}]}]}
+
+        self.assertEqual(
+            evaluate_nvd_configurations(cve, [target])["status"],
+            "not_applicable",
+        )
+
+    def test_cpe_any_and_na_attribute_relations_follow_nist_rules(self):
+        cases = [
+            ("*", "-", "applicable"),
+            ("*", "acme", "applicable"),
+            ("-", "-", "applicable"),
+            ("-", "acme", "not_applicable"),
+            ("acme", "-", "not_applicable"),
+        ]
+        for source_vendor, target_vendor, expected in cases:
+            with self.subTest(source=source_vendor, target=target_vendor):
+                criteria = f"cpe:2.3:a:{source_vendor}:reader:2.4:*:*:*:*:*:*:*"
+                target = f"cpe:2.3:a:{target_vendor}:reader:2.4:*:*:*:*:*:*:*"
+                cve = {"configurations": [{"nodes": [{"cpeMatch": [{
+                    "criteria": criteria, "vulnerable": True,
+                }]}]}]}
+                self.assertEqual(
+                    evaluate_nvd_configurations(cve, [target])["status"],
+                    expected,
+                )
+
+    def test_escaped_wildcard_is_not_treated_as_a_pattern(self):
+        criteria = r"cpe:2.3:a:acme:reader\\*:2.4:*:*:*:*:*:*:*"
+        literal_target = r"cpe:2.3:a:acme:reader\\*:2.4:*:*:*:*:*:*:*"
+        other_target = "cpe:2.3:a:acme:readerx:2.4:*:*:*:*:*:*:*"
+        cve = {"configurations": [{"nodes": [{"cpeMatch": [{
+            "criteria": criteria, "vulnerable": True,
+        }]}]}]}
+
+        self.assertEqual(
+            evaluate_nvd_configurations(cve, [literal_target])["status"],
+            "applicable",
+        )
+        self.assertEqual(
+            evaluate_nvd_configurations(cve, [other_target])["status"],
+            "not_applicable",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
