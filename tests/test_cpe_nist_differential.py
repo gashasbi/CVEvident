@@ -25,7 +25,7 @@ CASES = (
     (cpe(vendor="-"), cpe(vendor="*")),
     (
         "cpe:2.3:a:acme:reader:2.4:*:*:*:*:*:*:*",
-        "cpe:2.3:*:acme:reader:2.4:*:*:*:*:*:*:*",
+        "cpe:2.3:o:acme:reader:2.4:*:*:*:*:*:*:*",
     ),
 )
 
