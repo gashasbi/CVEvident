@@ -32,10 +32,22 @@ class NVDConfigurationValidationTests(unittest.TestCase):
                 self.assertEqual(result["status"], "unknown")
                 self.assertEqual(result["result"], "configuration_indeterminate")
 
+    def test_non_string_operator_makes_node_indeterminate(self):
+        cve = {
+            "configurations": [{
+                "operator": None,
+                "cpeMatch": [{
+                    "criteria": TARGET,
+                    "vulnerable": True,
+                }],
+            }]
+        }
+        self.assertEqual(evaluate_nvd_configurations(cve, [TARGET])["status"], "unknown")
+
     def test_malformed_cpe_match_collection_is_not_ignored(self):
         cve = {
             "configurations": [{
-                "operator": "OR",
+                "operator": "AND",
                 "cpeMatch": "not-an-array",
                 "nodes": [MATCHING_NODE],
             }]
@@ -48,7 +60,7 @@ class NVDConfigurationValidationTests(unittest.TestCase):
             with self.subTest(field=field):
                 cve = {
                     "configurations": [{
-                        "operator": "OR",
+                        "operator": "AND",
                         field: "not-an-array",
                         "cpeMatch": [{
                             "criteria": TARGET,
