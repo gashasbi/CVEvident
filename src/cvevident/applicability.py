@@ -209,40 +209,98 @@ def _version_matches(criteria: dict[str, str], match: dict[str, Any], target: di
     return relation in {"equal", "superset"}
 
 
-def _match_cpe(criteria_text: str, match: dict[str, Any], target_text: str) -> tuple[bool | None, dict[str, Any]]:
+def compare_cpe23(source_text: str, target_text: str) -> dict[str, Any]:
+    """Compare two CPE 2.3 names using the NISTIR 7696 set relations."""
+    source = parse_cpe23(source_text)
+    target = parse_cpe23(target_text)
+    if source is None or target is None:
+        return {
+            "relation": "undefined",
+            "reason": "invalid_cpe_2_3",
+            "attribute_relations": {},
+        }
+
+    relations = {
+        field: _attribute_relation(source[field], target[field])
+        for field in _FIELDS
+    }
+    values = list(relations.values())
+    if "disjoint" in values:
+        relation = "disjoint"
+    elif None in values:
+        relation = "undefined"
+    elif all(value == "equal" for value in values):
+        relation = "equal"
+    elif all(value in {"subset", "equal"} for value in values):
+        relation = "subset"
+    elif all(value in {"superset", "equal"} for value in values):
+        relation = "superset"
+    else:
+        relation = "undefined"
+
+    return {
+        "relation": relation,
+        "attribute_relations": relations,
+    }
+
+
+def _match_cpe(
+    criteria_text: str, match: dict[str, Any], target_text: str
+) -> tuple[bool | None, dict[str, Any]]:
     criteria = parse_cpe23(criteria_text)
     target = parse_cpe23(target_text)
     if criteria is None or target is None:
         return None, {"status": "unknown", "reason": "invalid_cpe_2_3"}
-    relations: dict[str, str | None] = {}
-    for field in _FIELDS:
-        if field == "version":
-            continue
-        if target[field] == "*" and criteria[field] != "*":
-            relations[field] = None
-            continue
-        relations[field] = _attribute_relation(criteria[field], target[field])
-    if any(relation == "disjoint" for relation in relations.values()):
-        field = next(name for name, relation in relations.items() if relation == "disjoint")
-        return False, {"status": "not_matched", "field": field, "attribute_relations": relations}
-    if any(relation is None for relation in relations.values()):
-        return None, {"status": "unknown", "reason": "unsupported_cpe_wildcard", "attribute_relations": relations}
-    if any(relation == "subset" for relation in relations.values()):
-        return False, {"status": "not_matched", "reason": "criteria_is_narrower_than_environment", "attribute_relations": relations}
+
+    comparison = compare_cpe23(criteria_text, target_text)
+    relation = comparison["relation"]
+    relations = comparison["attribute_relations"]
+    if relation == "disjoint":
+        field = next(
+            name for name, value in relations.items() if value == "disjoint"
+        )
+        return False, {
+            "status": "not_matched",
+            "field": field,
+            "name_relation": relation,
+            "attribute_relations": relations,
+        }
+    if relation == "undefined":
+        return None, {
+            "status": "unknown",
+            "reason": "unsupported_cpe_wildcard",
+            "name_relation": relation,
+            "attribute_relations": relations,
+        }
+    if relation == "subset":
+        return False, {
+            "status": "not_matched",
+            "reason": "criteria_is_narrower_than_environment",
+            "name_relation": relation,
+            "attribute_relations": relations,
+        }
+
     version_result = _version_matches(criteria, match, target)
     if version_result is None:
-        return None, {"status": "unknown", "reason": "unsupported_version_range"}
+        return None, {
+            "status": "unknown",
+            "reason": "unsupported_version_range",
+            "name_relation": relation,
+            "attribute_relations": relations,
+        }
     if not version_result:
-        return False, {"status": "not_matched", "field": "version", "attribute_relations": relations}
-    relations["version"] = _attribute_relation(criteria["version"], target["version"])
-    if relations["version"] is None:
-        return None, {"status": "unknown", "reason": "unsupported_cpe_wildcard", "attribute_relations": relations}
+        return False, {
+            "status": "not_matched",
+            "field": "version",
+            "name_relation": relation,
+            "attribute_relations": relations,
+        }
     return True, {
         "status": "matched",
         "criteria": criteria_text,
         "environment_cpe": target_text,
         "vulnerable": bool(match.get("vulnerable", False)),
-        "name_relation": "superset" if "superset" in relations.values() else "equal",
+        "name_relation": relation,
         "attribute_relations": relations,
     }
 
