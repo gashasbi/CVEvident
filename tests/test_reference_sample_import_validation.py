@@ -46,5 +46,27 @@ class ReferenceSampleImportValidationTests(unittest.TestCase):
         self.assertEqual(lookup_reference_samples("a" * 64, self.db_path), [])
 
 
+    def test_non_boolean_link_verification_is_rejected(self):
+        import sqlite3
+
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "INSERT INTO vulnerabilities(cve_id, updated_at) VALUES(?, ?)",
+                ("CVE-2024-12345", "2026-11-19T00:00:00+00:00"),
+            )
+        sample = {
+            **SAMPLE,
+            "cve_links": [{
+                "cve_id": "CVE-2024-12345",
+                "verified": "false",
+            }],
+        }
+        with self.assertRaisesRegex(ValueError, "verified must be a boolean"):
+            self.import_payload([sample])
+
+        self.assertEqual(lookup_reference_samples("a" * 64, self.db_path), [])
+
+
+
 if __name__ == "__main__":
     unittest.main()
