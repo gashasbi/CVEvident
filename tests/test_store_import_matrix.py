@@ -94,6 +94,35 @@ def test_source_importers_fail_explicitly_for_missing_files(
         importer(tmp_path / filename, tmp_path / "db.sqlite3")
 
 
+
+def test_kev_import_preserves_catalog_snapshot_metadata(tmp_path: Path) -> None:
+    db_path = init_db(tmp_path / "kev-metadata.sqlite3")
+    path = _write_json(tmp_path / "kev.json", {
+        "catalogVersion": "2026.11.19",
+        "dateReleased": "2026-11-19T00:00:00.000Z",
+        "count": 1,
+        "vulnerabilities": [{
+            "cveID": "CVE-2024-1234",
+            "vendorProject": "Example Vendor",
+            "product": "Example Product",
+            "vulnerabilityName": "Example issue",
+            "dateAdded": "2026-11-19",
+            "shortDescription": "Synthetic fixture",
+            "requiredAction": "Update",
+            "dueDate": "2026-12-01",
+        }],
+    })
+
+    assert import_kev_json(path, db_path) == 1
+
+    with connect(db_path) as conn:
+        source = conn.execute(
+            "SELECT details FROM source_sync WHERE source='CISA KEV'"
+        ).fetchone()
+    assert "catalog_version=2026.11.19" in source["details"]
+    assert "date_released=2026-11-19T00:00:00.000Z" in source["details"]
+    assert "catalog_count=1" in source["details"]
+
 def test_kev_import_skips_invalid_rows_and_only_records_http_notes(tmp_path: Path) -> None:
     db_path = init_db(tmp_path / "kev.sqlite3")
     payload = {
