@@ -35,5 +35,13 @@ class CPE23WildcardSyntaxTests(unittest.TestCase):
                 self.assertIsNone(parse_cpe23(value))
 
 
+    def test_part_component_must_be_application_operating_system_or_hardware(self):
+        for part in ("*", "-", "x"):
+            with self.subTest(part=part):
+                value = f"cpe:2.3:{part}:acme:reader:2.4:*:*:*:*:*:*:*"
+                self.assertIsNone(parse_cpe23(value))
+
+
+
 if __name__ == "__main__":
     unittest.main()
