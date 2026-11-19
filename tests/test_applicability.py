@@ -342,5 +342,36 @@ class ApplicabilityTests(unittest.TestCase):
                 self.assertEqual(compare_cpe23(source, target)["relation"], expected)
 
 
+    def test_cpe_attribute_relation_matrix_matches_nist_table_6_2(self):
+        cases = [
+            ("*", "*", "equal"),
+            ("*", "-", "superset"),
+            ("*", "acme", "superset"),
+            ("*", "acme*", "undefined"),
+            ("-", "*", "subset"),
+            ("-", "-", "equal"),
+            ("-", "acme", "disjoint"),
+            ("-", "acme*", "undefined"),
+            ("acme", "acme", "equal"),
+            ("acme", "other", "disjoint"),
+            ("acme", "acme*", "undefined"),
+            ("acme", "-", "disjoint"),
+            ("acme", "*", "subset"),
+            ("acme*", "acme", "superset"),
+            ("acme*", "other", "disjoint"),
+            ("acme*", "*", "subset"),
+            ("acme*", "-", "disjoint"),
+            ("acme*", "other*", "undefined"),
+        ]
+        for source_vendor, target_vendor, expected in cases:
+            with self.subTest(source=source_vendor, target=target_vendor):
+                source = f"cpe:2.3:a:{source_vendor}:reader:2.4:*:*:*:*:*:*:*"
+                target = f"cpe:2.3:a:{target_vendor}:reader:2.4:*:*:*:*:*:*:*"
+                self.assertEqual(
+                    compare_cpe23(source, target)["attribute_relations"]["vendor"],
+                    expected,
+                )
+
+
 if __name__ == "__main__":
     unittest.main()
