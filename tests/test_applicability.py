@@ -239,8 +239,8 @@ class ApplicabilityTests(unittest.TestCase):
                 )
 
     def test_escaped_wildcard_is_not_treated_as_a_pattern(self):
-        criteria = r"cpe:2.3:a:acme:reader\\*:2.4:*:*:*:*:*:*:*"
-        literal_target = r"cpe:2.3:a:acme:reader\\*:2.4:*:*:*:*:*:*:*"
+        criteria = r"cpe:2.3:a:acme:reader\*:2.4:*:*:*:*:*:*:*"
+        literal_target = r"cpe:2.3:a:acme:reader\*:2.4:*:*:*:*:*:*:*"
         other_target = "cpe:2.3:a:acme:readerx:2.4:*:*:*:*:*:*:*"
         cve = {"configurations": [{"nodes": [{"cpeMatch": [{
             "criteria": criteria, "vulnerable": True,
