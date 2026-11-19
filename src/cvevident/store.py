@@ -270,13 +270,11 @@ def _iter_nvd_items(source_path: Path) -> Iterable[dict[str, Any]]:
 def _valid_nvd_configuration_node(node: Any) -> bool:
     if not isinstance(node, dict):
         return False
-    operator = node.get("operator")
-    if operator is not None and (
-        not isinstance(operator, str) or operator.upper() not in {"AND", "OR"}
-    ):
-        return False
-    negate = node.get("negate")
-    if negate is not None and not isinstance(negate, bool):
+    if "operator" in node:
+        operator = node["operator"]
+        if not isinstance(operator, str) or operator.upper() not in {"AND", "OR"}:
+            return False
+    if "negate" in node and not isinstance(node["negate"], bool):
         return False
 
     if "cpeMatch" in node:
